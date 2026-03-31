@@ -6,12 +6,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math/big"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -37,6 +39,16 @@ func main() {
 	)
 	flag.Parse()
 
+	// Auto-detect client.json next to executable.
+	if *cfgPath == "" {
+		if exe, err := os.Executable(); err == nil {
+			autoPath := filepath.Join(filepath.Dir(exe), "client.json")
+			if _, err := os.Stat(autoPath); err == nil {
+				*cfgPath = autoPath
+			}
+		}
+	}
+
 	var cfg config.Config
 	if *cfgPath != "" {
 		loaded, err := config.Load(*cfgPath)
@@ -45,6 +57,7 @@ func main() {
 			os.Exit(1)
 		}
 		cfg = *loaded
+		fmt.Printf("Loaded config: %s\n", *cfgPath)
 	} else if *pskHex != "" && *serverAddr != "" {
 		// All from flags.
 		cfg = config.Config{
@@ -78,6 +91,11 @@ func main() {
 	if cfg.SOCKSAddr == "" || cfg.SOCKSAddr == "127.0.0.1:1080" {
 		port := randomPort()
 		cfg.SOCKSAddr = fmt.Sprintf("127.0.0.1:%d", port)
+	}
+
+	// Save config next to the executable for future runs.
+	if *cfgPath == "" {
+		saveConfig(&cfg)
 	}
 
 	log := logger.New(cfg.LogLevel)
@@ -223,6 +241,25 @@ func randomString(length int) string {
 		b[i] = charset[n.Int64()]
 	}
 	return string(b)
+}
+
+func saveConfig(cfg *config.Config) {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cfgPath := filepath.Join(filepath.Dir(exe), "client.json")
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(cfgPath, data, 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not save config: %v\n", err)
+		return
+	}
+	fmt.Printf("  Config saved: %s\n", cfgPath)
+	fmt.Printf("  Next time run: chameleon-client -config %s\n", cfgPath)
 }
 
 func newAEAD(keys *crypto.SessionKeys) (interface {
