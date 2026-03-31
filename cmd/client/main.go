@@ -2,13 +2,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"genome/config"
@@ -24,7 +28,7 @@ func main() {
 	var (
 		cfgPath    = flag.String("config", "", "path to config JSON file")
 		serverAddr = flag.String("server", "", "server UDP address (host:port)")
-		socksAddr  = flag.String("socks", "127.0.0.1:1080", "SOCKS5 listen address")
+		socksAddr  = flag.String("socks", "", "SOCKS5 listen address")
 		socksUser  = flag.String("socks-user", "", "SOCKS5 username (enables auth)")
 		socksPass  = flag.String("socks-pass", "", "SOCKS5 password (enables auth)")
 		pskHex     = flag.String("psk", "", "pre-shared key (hex)")
@@ -41,10 +45,11 @@ func main() {
 			os.Exit(1)
 		}
 		cfg = *loaded
-	} else {
+	} else if *pskHex != "" && *serverAddr != "" {
+		// All from flags.
 		cfg = config.Config{
 			PSKHex:          *pskHex,
-			ListenAddr:      ":0", // ephemeral port for client
+			ListenAddr:      ":0",
 			PeerAddr:        *serverAddr,
 			SOCKSAddr:       *socksAddr,
 			SOCKSUser:       *socksUser,
@@ -52,16 +57,27 @@ func main() {
 			CipherSuiteName: *cipher,
 			LogLevel:        *logLevel,
 		}
-		cfg.Defaults()
+	} else {
+		// Interactive mode.
+		cfg = interactiveSetup()
+		cfg.CipherSuiteName = *cipher
+		if *logLevel != "" {
+			cfg.LogLevel = *logLevel
+		}
 	}
+	cfg.Defaults()
 
-	if cfg.PSKHex == "" {
-		fmt.Fprintln(os.Stderr, "Error: PSK is required. Use -psk flag or config file.")
-		os.Exit(1)
+	// Generate random SOCKS credentials if not set.
+	if cfg.SOCKSUser == "" {
+		cfg.SOCKSUser = randomString(8)
 	}
-	if cfg.PeerAddr == "" {
-		fmt.Fprintln(os.Stderr, "Error: server address is required. Use -server flag or config file.")
-		os.Exit(1)
+	if cfg.SOCKSPass == "" {
+		cfg.SOCKSPass = randomString(12)
+	}
+	// Generate random SOCKS port if not set.
+	if cfg.SOCKSAddr == "" || cfg.SOCKSAddr == "127.0.0.1:1080" {
+		port := randomPort()
+		cfg.SOCKSAddr = fmt.Sprintf("127.0.0.1:%d", port)
 	}
 
 	log := logger.New(cfg.LogLevel)
@@ -88,14 +104,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Resolve server address.
 	peerUDP, err := net.ResolveUDPAddr("udp", cfg.PeerAddr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: resolving server: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Bind local UDP.
 	localAddr, err := net.ResolveUDPAddr("udp", cfg.ListenAddr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: resolving local: %v\n", err)
@@ -123,25 +137,92 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Info("shutting down...")
+		fmt.Println("\nShutting down...")
 		cancel()
 		client.Close()
 		session.Close()
 	}()
 
-	log.Info("chameleon client started",
-		"socks", cfg.SOCKSAddr,
-		"server", cfg.PeerAddr)
+	fmt.Println()
+	fmt.Println("===========================================")
+	fmt.Printf("  SOCKS5 proxy:  %s\n", cfg.SOCKSAddr)
+	fmt.Printf("  Username:      %s\n", cfg.SOCKSUser)
+	fmt.Printf("  Password:      %s\n", cfg.SOCKSPass)
+	fmt.Printf("  Server:        %s\n", cfg.PeerAddr)
+	fmt.Println("===========================================")
+	fmt.Println("  Configure your browser/app to use SOCKS5")
+	fmt.Printf("  proxy at %s with the credentials above.\n", cfg.SOCKSAddr)
+	fmt.Println("  Press Ctrl+C to stop.")
+	fmt.Println("===========================================")
+	fmt.Println()
 
 	if err := client.Run(ctx); err != nil {
 		log.Error("client error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// interactiveSetup prompts the user for connection parameters.
+func interactiveSetup() config.Config {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Println("Chameleon Client — Interactive Setup")
+	fmt.Println()
+
+	serverIP := prompt(reader, "Server IP", "")
+	serverPort := prompt(reader, "Server port", "9000")
+	psk := prompt(reader, "PSK (hex)", "")
+	socksPort := prompt(reader, fmt.Sprintf("SOCKS5 port [random=%d]", randomPort()), "")
+	socksUser := prompt(reader, fmt.Sprintf("SOCKS5 username [random=%s]", "auto"), "")
+	socksPass := prompt(reader, fmt.Sprintf("SOCKS5 password [random=%s]", "auto"), "")
+
+	socksAddr := ""
+	if socksPort != "" {
+		socksAddr = "127.0.0.1:" + socksPort
+	}
+
+	return config.Config{
+		PSKHex:     psk,
+		ListenAddr: ":0",
+		PeerAddr:   net.JoinHostPort(serverIP, serverPort),
+		SOCKSAddr:  socksAddr,
+		SOCKSUser:  socksUser,
+		SOCKSPass:  socksPass,
+		LogLevel:   "info",
+	}
+}
+
+func prompt(reader *bufio.Reader, label, defaultVal string) string {
+	if defaultVal != "" {
+		fmt.Printf("  %s [%s]: ", label, defaultVal)
+	} else {
+		fmt.Printf("  %s: ", label)
+	}
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return defaultVal
+	}
+	return line
+}
+
+func randomPort() int {
+	n, _ := rand.Int(rand.Reader, big.NewInt(40000))
+	return int(n.Int64()) + 10000
+}
+
+func randomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		b[i] = charset[n.Int64()]
+	}
+	return string(b)
 }
 
 func newAEAD(keys *crypto.SessionKeys) (interface {
