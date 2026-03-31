@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+#
+# Chameleon server — one-line install:
+#   curl -sSL https://raw.githubusercontent.com/USER/genome/main/install-server.sh | bash
+#
+# Or with custom port:
+#   curl -sSL ... | bash -s -- --port 443
+#
+set -euo pipefail
+
+# --- Defaults ---
+INSTALL_DIR="/usr/local/bin"
+CONFIG_DIR="/etc/chameleon"
+SERVICE_NAME="chameleon-server"
+PORT=9000
+REPO="william-aqn/genome"
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --port)  PORT="$2"; shift 2 ;;
+        --dir)   INSTALL_DIR="$2"; shift 2 ;;
+        --repo)  REPO="$2"; shift 2 ;;
+        *)       echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# --- Helpers ---
+info()  { echo -e "\033[1;32m>>>\033[0m $*"; }
+warn()  { echo -e "\033[1;33m>>>\033[0m $*"; }
+fail()  { echo -e "\033[1;31m>>>\033[0m $*"; exit 1; }
+
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || fail "'$1' is required but not found."
+}
+
+# --- Detect arch ---
+detect_arch() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64)  echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *) fail "Unsupported architecture: $arch" ;;
+    esac
+}
+
+# --- Detect init system ---
+has_systemd() {
+    [ -d /run/systemd/system ] 2>/dev/null
+}
+
+# --- Check root ---
+if [ "$(id -u)" -ne 0 ]; then
+    fail "Run as root: curl -sSL ... | sudo bash"
+fi
+
+need_cmd curl
+need_cmd openssl
+
+ARCH=$(detect_arch)
+info "Detected architecture: linux/${ARCH}"
+
+# --- Download binary ---
+BINARY_NAME="chameleon-server-linux-${ARCH}"
+BINARY_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
+BINARY_PATH="${INSTALL_DIR}/${SERVICE_NAME}"
+
+info "Downloading ${BINARY_NAME}..."
+if curl -fsSL -o "${BINARY_PATH}" "${BINARY_URL}" 2>/dev/null; then
+    chmod +x "${BINARY_PATH}"
+    info "Installed to ${BINARY_PATH}"
+else
+    warn "Download failed. Trying to build from source..."
+    need_cmd go
+    need_cmd git
+
+    TMPDIR=$(mktemp -d)
+    trap "rm -rf ${TMPDIR}" EXIT
+    info "Cloning repo..."
+    git clone --depth 1 "https://github.com/${REPO}.git" "${TMPDIR}/genome"
+    cd "${TMPDIR}/genome"
+    info "Building..."
+    go build -trimpath -o "${BINARY_PATH}" ./cmd/server
+    chmod +x "${BINARY_PATH}"
+    cd /
+    info "Built and installed to ${BINARY_PATH}"
+fi
+
+# --- Generate PSK ---
+mkdir -p "${CONFIG_DIR}"
+PSK_FILE="${CONFIG_DIR}/psk"
+
+if [ -f "$PSK_FILE" ]; then
+    info "PSK already exists at ${PSK_FILE}, keeping it."
+    PSK=$(cat "$PSK_FILE")
+else
+    PSK=$(openssl rand -hex 32)
+    echo "$PSK" > "$PSK_FILE"
+    chmod 600 "$PSK_FILE"
+    info "Generated PSK → ${PSK_FILE}"
+fi
+
+# --- Write config ---
+CONFIG_FILE="${CONFIG_DIR}/server.json"
+cat > "$CONFIG_FILE" <<EOF
+{
+  "psk": "${PSK}",
+  "listen_addr": ":${PORT}",
+  "cipher_suite": "chacha20",
+  "log_level": "info",
+  "idle_timeout_sec": 300
+}
+EOF
+chmod 600 "$CONFIG_FILE"
+info "Config → ${CONFIG_FILE}"
+
+# --- Systemd service ---
+if has_systemd; then
+    info "Installing systemd service..."
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+[Unit]
+Description=Chameleon Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${BINARY_PATH} -config ${CONFIG_FILE}
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}"
+
+    sleep 1
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        info "Service running!"
+    else
+        warn "Service may have failed to start. Check: journalctl -u ${SERVICE_NAME}"
+    fi
+else
+    warn "systemd not found. Start manually:"
+    echo "  ${BINARY_PATH} -config ${CONFIG_FILE}"
+fi
+
+# --- Detect external IP ---
+EXTERNAL_IP=$(curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null \
+           || curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null \
+           || hostname -I 2>/dev/null | awk '{print $1}' \
+           || echo "YOUR_SERVER_IP")
+
+# --- Print instructions ---
+echo ""
+echo "=============================================="
+echo "  Chameleon server installed successfully!"
+echo "=============================================="
+echo ""
+echo "  Server:  ${EXTERNAL_IP}:${PORT}"
+echo "  PSK:     ${PSK}"
+echo ""
+echo "  --- Client connection ---"
+echo ""
+echo "  Option 1: CLI flags"
+echo "    ./chameleon-client -server ${EXTERNAL_IP}:${PORT} -psk ${PSK}"
+echo ""
+echo "  Option 2: Config file (client.json):"
+echo "    {"
+echo "      \"psk\": \"${PSK}\","
+echo "      \"listen_addr\": \":0\","
+echo "      \"peer_addr\": \"${EXTERNAL_IP}:${PORT}\","
+echo "      \"socks_addr\": \"127.0.0.1:1080\""
+echo "    }"
+echo "    ./chameleon-client -config client.json"
+echo ""
+echo "  Then use any app:"
+echo "    curl --socks5 127.0.0.1:1080 https://example.com"
+echo ""
+if has_systemd; then
+echo "  --- Manage service ---"
+echo "    systemctl status  ${SERVICE_NAME}"
+echo "    systemctl stop    ${SERVICE_NAME}"
+echo "    systemctl restart ${SERVICE_NAME}"
+echo "    journalctl -u ${SERVICE_NAME} -f"
+echo ""
+fi
+echo "  Config:  ${CONFIG_FILE}"
+echo "  PSK:     ${PSK_FILE}"
+echo "  Binary:  ${BINARY_PATH}"
+echo "=============================================="
