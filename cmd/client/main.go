@@ -37,6 +37,7 @@ func main() {
 		pskHex     = flag.String("psk", "", "pre-shared key (hex)")
 		cipher     = flag.String("cipher", "chacha20", "cipher suite: chacha20 or aes256gcm")
 		logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")
+		noUI       = flag.Bool("no-ui", false, "disable dashboard, plain log output")
 	)
 	flag.Parse()
 
@@ -81,21 +82,19 @@ func main() {
 	}
 	cfg.Defaults()
 
-	// Generate random SOCKS credentials if not set.
-	if cfg.SOCKSUser == "" {
-		cfg.SOCKSUser = randomString(8)
-	}
-	if cfg.SOCKSPass == "" {
-		cfg.SOCKSPass = randomString(12)
-	}
-	// Generate random SOCKS port if not set.
-	if cfg.SOCKSAddr == "" || cfg.SOCKSAddr == "127.0.0.1:1080" {
-		port := randomPort()
-		cfg.SOCKSAddr = fmt.Sprintf("127.0.0.1:%d", port)
-	}
-
-	// Save config next to the executable for future runs.
-	if *cfgPath == "" {
+	// Generate random SOCKS credentials/port only for fresh configs (not loaded from file).
+	fromFile := *cfgPath != ""
+	if !fromFile {
+		if cfg.SOCKSUser == "" {
+			cfg.SOCKSUser = randomString(8)
+		}
+		if cfg.SOCKSPass == "" {
+			cfg.SOCKSPass = randomString(12)
+		}
+		if cfg.SOCKSAddr == "" || cfg.SOCKSAddr == "127.0.0.1:1080" {
+			port := randomPort()
+			cfg.SOCKSAddr = fmt.Sprintf("127.0.0.1:%d", port)
+		}
 		saveConfig(&cfg)
 	}
 
@@ -142,15 +141,23 @@ func main() {
 
 	// --- Stats + Dashboard ---
 	stats := &dashboard.Stats{}
+	useUI := !*noUI
 
 	shaper := transport.NewShaper(0, 0)
 	tunnel := transport.NewTunnel(conn, peerUDP, aead, keys.NonceBase, genome, shaper)
 
-	dash := dashboard.New(stats, cfg.SOCKSAddr, cfg.SOCKSUser, cfg.SOCKSPass, cfg.PeerAddr)
+	var dash *dashboard.Dashboard
+	if useUI {
+		dash = dashboard.New(stats, cfg.SOCKSAddr, cfg.SOCKSUser, cfg.SOCKSPass, cfg.PeerAddr)
+	}
 
 	tunnel.SetDropCallback(func(reason string, err error) {
 		stats.PacketsDropped.Add(1)
-		dash.Log(fmt.Sprintf("DROP %s: %v", reason, err))
+		if dash != nil {
+			dash.Log(fmt.Sprintf("DROP %s: %v", reason, err))
+		} else {
+			log.Warn("packet dropped", "reason", reason, "err", err)
+		}
 	})
 	tunnel.SetStatsCallbacks(
 		func(n int) { stats.BytesSent.Add(int64(n)); stats.PacketsSent.Add(1) },
@@ -171,10 +178,15 @@ func main() {
 
 	client := proxy.NewClient(cfg.SOCKSAddr, session, log, cfg.SOCKSUser, cfg.SOCKSPass)
 
-	// Hook SOCKS5 connect handler to log requests to dashboard.
-	client.SetConnectLogger(func(dest string) {
-		dash.LogRequest(dest)
-	})
+	if dash != nil {
+		client.SetConnectLogger(func(dest string) {
+			dash.LogRequest(dest)
+		})
+	} else {
+		client.SetConnectLogger(func(dest string) {
+			log.Info("connect", "dest", dest)
+		})
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -183,17 +195,28 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		dash.Stop()
+		if dash != nil {
+			dash.Stop()
+		}
+		fmt.Println("\nShutting down...")
 		cancel()
 		client.Close()
 		session.Close()
 	}()
 
-	// Start dashboard in background.
-	go dash.Run()
+	if dash != nil {
+		go dash.Run()
+	} else {
+		log.Info("chameleon client started",
+			"socks", cfg.SOCKSAddr,
+			"user", cfg.SOCKSUser,
+			"server", cfg.PeerAddr)
+	}
 
 	if err := client.Run(ctx); err != nil {
-		dash.Stop()
+		if dash != nil {
+			dash.Stop()
+		}
 		log.Error("client error", "err", err)
 		os.Exit(1)
 	}
