@@ -75,24 +75,44 @@ fi
 # --- Download binary ---
 download_binary() {
     info "Downloading ${BINARY_NAME}..."
-    if curl -fsSL -o "${BINARY_PATH}" "${BINARY_URL}" 2>/dev/null; then
+
+    # Try GitHub release first.
+    if curl -fsSL --max-time 30 -o "${BINARY_PATH}" "${BINARY_URL}" 2>/dev/null; then
         chmod +x "${BINARY_PATH}"
         info "Installed to ${BINARY_PATH}"
-    else
-        warn "Download failed. Trying to build from source..."
-        need_cmd go
-        need_cmd git
+        return
+    fi
 
-        TMPDIR=$(mktemp -d)
-        trap "rm -rf ${TMPDIR}" EXIT
+    # GitHub may be blocked — try direct download via GitHub API with redirect.
+    DIRECT_URL="https://api.github.com/repos/${REPO}/releases/latest"
+    ASSET_URL=$(curl -fsSL --max-time 10 "$DIRECT_URL" 2>/dev/null \
+        | grep -o "\"browser_download_url\"[^\"]*\"[^\"]*${BINARY_NAME}\"" \
+        | grep -o 'https://[^"]*' || true)
+    if [ -n "$ASSET_URL" ] && curl -fsSL --max-time 30 -o "${BINARY_PATH}" "$ASSET_URL" 2>/dev/null; then
+        chmod +x "${BINARY_PATH}"
+        info "Installed to ${BINARY_PATH}"
+        return
+    fi
+
+    # Fallback: build from source if Go is available.
+    if command -v go >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+        warn "Download failed. Building from source..."
+        BUILD_TMP=$(mktemp -d)
+        trap "rm -rf ${BUILD_TMP}" EXIT
         info "Cloning repo..."
-        git clone --depth 1 "https://github.com/${REPO}.git" "${TMPDIR}/genome"
-        cd "${TMPDIR}/genome"
+        git clone --depth 1 "https://github.com/${REPO}.git" "${BUILD_TMP}/genome"
+        cd "${BUILD_TMP}/genome"
         info "Building..."
         go build -trimpath -o "${BINARY_PATH}" ./cmd/server
         chmod +x "${BINARY_PATH}"
         cd /
         info "Built and installed to ${BINARY_PATH}"
+    else
+        echo ""
+        fail "Download failed (GitHub may be blocked). Upload the binary manually:\n\n" \
+             "  On your local machine:\n" \
+             "    scp dist/chameleon-server-linux-amd64 root@YOUR_SERVER:${BINARY_PATH}\n\n" \
+             "  Then re-run this script."
     fi
 }
 download_binary
