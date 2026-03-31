@@ -19,6 +19,7 @@ import (
 
 	"genome/config"
 	"genome/crypto"
+	"genome/internal/dashboard"
 	"genome/internal/logger"
 	"genome/morph"
 	"genome/mux"
@@ -139,18 +140,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	// --- Stats + Dashboard ---
+	stats := &dashboard.Stats{}
+
 	shaper := transport.NewShaper(0, 0)
 	tunnel := transport.NewTunnel(conn, peerUDP, aead, keys.NonceBase, genome, shaper)
+
+	dash := dashboard.New(stats, cfg.SOCKSAddr, cfg.SOCKSUser, cfg.SOCKSPass, cfg.PeerAddr)
+
 	tunnel.SetDropCallback(func(reason string, err error) {
-		log.Warn("packet dropped", "reason", reason, "err", err)
+		stats.PacketsDropped.Add(1)
+		dash.Log(fmt.Sprintf("DROP %s: %v", reason, err))
 	})
+	tunnel.SetStatsCallbacks(
+		func(n int) { stats.BytesSent.Add(int64(n)); stats.PacketsSent.Add(1) },
+		func(n int) { stats.BytesRecv.Add(int64(n)); stats.PacketsRecv.Add(1) },
+	)
 
 	session := mux.NewSession(tunnel, true, log)
 	if cfg.IdleTimeout() > 0 {
 		session.SetIdleTimeout(cfg.IdleTimeout())
 	}
+	session.SetStreamCallbacks(
+		func() {
+			stats.OpenStreams.Add(1)
+			stats.TotalStreams.Add(1)
+		},
+		func() { stats.OpenStreams.Add(-1) },
+	)
 
 	client := proxy.NewClient(cfg.SOCKSAddr, session, log, cfg.SOCKSUser, cfg.SOCKSPass)
+
+	// Hook SOCKS5 connect handler to log requests to dashboard.
+	client.SetConnectLogger(func(dest string) {
+		dash.LogRequest(dest)
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -159,26 +183,17 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		fmt.Println("\nShutting down...")
+		dash.Stop()
 		cancel()
 		client.Close()
 		session.Close()
 	}()
 
-	fmt.Println()
-	fmt.Println("===========================================")
-	fmt.Printf("  SOCKS5 proxy:  %s\n", cfg.SOCKSAddr)
-	fmt.Printf("  Username:      %s\n", cfg.SOCKSUser)
-	fmt.Printf("  Password:      %s\n", cfg.SOCKSPass)
-	fmt.Printf("  Server:        %s\n", cfg.PeerAddr)
-	fmt.Println("===========================================")
-	fmt.Println("  Configure your browser/app to use SOCKS5")
-	fmt.Printf("  proxy at %s with the credentials above.\n", cfg.SOCKSAddr)
-	fmt.Println("  Press Ctrl+C to stop.")
-	fmt.Println("===========================================")
-	fmt.Println()
+	// Start dashboard in background.
+	go dash.Run()
 
 	if err := client.Run(ctx); err != nil {
+		dash.Stop()
 		log.Error("client error", "err", err)
 		os.Exit(1)
 	}

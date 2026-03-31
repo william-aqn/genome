@@ -46,6 +46,10 @@ type Tunnel struct {
 
 	// onDrop is an optional callback for debugging dropped packets.
 	onDrop func(reason string, err error)
+
+	// Optional stats callbacks.
+	onSend func(n int) // called with wire bytes sent
+	onRecv func(n int) // called with wire bytes received
 }
 
 // NewTunnel creates a tunnel over an existing UDP connection.
@@ -76,6 +80,12 @@ func NewTunnel(conn *net.UDPConn, peer *net.UDPAddr, aead cipher.AEAD,
 // SetDropCallback sets a callback invoked when a packet is dropped.
 func (t *Tunnel) SetDropCallback(fn func(reason string, err error)) {
 	t.onDrop = fn
+}
+
+// SetStatsCallbacks sets optional callbacks for byte counting.
+func (t *Tunnel) SetStatsCallbacks(onSend, onRecv func(int)) {
+	t.onSend = onSend
+	t.onRecv = onRecv
 }
 
 // SetReadTimeout sets the UDP read deadline duration.
@@ -138,9 +148,12 @@ func (t *Tunnel) Send(payload []byte) error {
 		return fmt.Errorf("transport: no peer address")
 	}
 
-	_, err = t.conn.WriteToUDP(wire, peer)
+	n, err := t.conn.WriteToUDP(wire, peer)
 	if err != nil {
 		return fmt.Errorf("transport: UDP write: %w", err)
+	}
+	if t.onSend != nil {
+		t.onSend(n)
 	}
 
 	return nil
@@ -205,6 +218,10 @@ func (t *Tunnel) Receive() ([]byte, error) {
 
 		// Commit replay window.
 		t.replayCommit(frame.Epoch)
+
+		if t.onRecv != nil {
+			t.onRecv(n)
+		}
 
 		return plaintext, nil
 	}

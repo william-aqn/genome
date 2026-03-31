@@ -14,9 +14,15 @@ import (
 
 // Client is the client-side proxy: SOCKS5 → mux → tunnel.
 type Client struct {
-	socks   *socks5.Server
-	session *mux.Session
-	logger  *slog.Logger
+	socks         *socks5.Server
+	session       *mux.Session
+	logger        *slog.Logger
+	connectLogger func(dest string)
+}
+
+// SetConnectLogger sets a callback invoked on each SOCKS5 CONNECT with "host:port".
+func (c *Client) SetConnectLogger(fn func(string)) {
+	c.connectLogger = fn
 }
 
 // NewClient creates a client proxy. If username/password are non-empty,
@@ -49,6 +55,11 @@ func (c *Client) SOCKSAddr() net.Addr {
 }
 
 func (c *Client) handleConnect(ctx context.Context, destAddr string, destPort uint16, clientConn net.Conn) error {
+	dest := socks5.FormatAddr(destAddr, destPort)
+	if c.connectLogger != nil {
+		c.connectLogger(dest)
+	}
+
 	stream, err := c.session.Open(destAddr, destPort)
 	if err != nil {
 		return err

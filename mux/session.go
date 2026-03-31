@@ -45,6 +45,10 @@ type Session struct {
 
 	closeOnce sync.Once
 	done      chan struct{}
+
+	// Optional callbacks for stats.
+	onStreamOpen  func()
+	onStreamClose func()
 }
 
 // NewSession creates a mux session over the given transport connection.
@@ -76,6 +80,12 @@ func NewSession(conn TransportConn, isClient bool, logger *slog.Logger) *Session
 	go s.keepaliveLoop()
 
 	return s
+}
+
+// SetStreamCallbacks sets optional callbacks for stream open/close events.
+func (s *Session) SetStreamCallbacks(onOpen, onClose func()) {
+	s.onStreamOpen = onOpen
+	s.onStreamClose = onClose
 }
 
 // SetIdleTimeout configures the idle timeout.
@@ -115,6 +125,9 @@ func (s *Session) Open(destAddr string, destPort uint16) (*Stream, error) {
 		return nil, fmt.Errorf("mux: sending OPEN: %w", err)
 	}
 
+	if s.onStreamOpen != nil {
+		s.onStreamOpen()
+	}
 	s.logger.Debug("stream opened", "stream_id", id, "dest", fmt.Sprintf("%s:%d", destAddr, destPort))
 	return stream, nil
 }
@@ -172,6 +185,9 @@ func (s *Session) removeStream(id uint32) {
 	s.streamsMu.Lock()
 	delete(s.streams, id)
 	s.streamsMu.Unlock()
+	if s.onStreamClose != nil {
+		s.onStreamClose()
+	}
 	s.logger.Debug("stream removed", "stream_id", id)
 }
 
