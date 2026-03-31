@@ -1,0 +1,74 @@
+# CLAUDE.md
+
+## Project overview
+
+Chameleon (`genome`) — polymorphic UDP tunneling protocol in Go. Every session derives a unique wire format ("genome") from a PSK via HKDF. Traffic appears as pure noise (~7.9 bits/byte entropy). Applications connect through a local SOCKS5 proxy; streams are multiplexed over one encrypted UDP tunnel to an exit server.
+
+## Architecture (bottom-up)
+
+1. **`internal/randutil`** — Deterministic PRNG (SHA-256 counter mode). Platform-stable, never use `math/rand` for genome derivation.
+2. **`crypto/`** — HKDF-SHA256 key derivation from PSK. AEAD: ChaCha20-Poly1305 (12-byte nonce), XChaCha20-Poly1305 (24-byte nonce), AES-256-GCM. Nonce = genome-derived prefix || epoch (big-endian uint32).
+3. **`morph/`** — Core polymorphism. `Derive(seed) -> *Genome` generates the wire format: magic byte, field order (Fisher-Yates), 0-3 decoy fields, nonce size 12/24, length encoding (BE/LE/varint/XOR), padding range. `Encoder`/`Decoder` handle frame serialization. Morph layer is crypto-agnostic — it never calls AEAD directly.
+4. **`mux/`** — Stream multiplexer over `TransportConn` interface. Commands: OPEN, DATA, CLOSE, ACK. Full reliable delivery: per-stream sequence numbers, SACK, fast retransmit (3 dup ACKs), RTT estimation (Jacobson/Karels), NewReno congestion control, per-stream flow control. StreamID allocation: client=odd, server=even.
+5. **`transport/`** — UDP tunnel glue: `payload -> AEAD.Seal -> morph.Encode -> UDP`. Anti-replay sliding window (256 epochs). Server discovers peer from first valid packet.
+6. **`socks5/`** — RFC 1928 SOCKS5, CONNECT only, no-auth. Hands off to `ConnectHandler`.
+7. **`proxy/`** — Client: SOCKS5 -> `session.Open` -> bidirectional relay. Server: `session.Accept` -> `net.Dial` -> relay.
+8. **`config/`** — JSON config + CLI flags. PSK is hex-encoded.
+9. **`cmd/client/`, `cmd/server/`** — Entry points with graceful shutdown (SIGINT/SIGTERM).
+
+## Build and test
+
+```bash
+go build ./...            # build all
+go test ./... -v          # run all tests
+go test ./... -count=1    # no cache
+go test ./proxy/ -v       # integration tests (end-to-end through tunnel)
+```
+
+## Key design decisions
+
+- **Morph is crypto-agnostic**: frame encode/decode never touches AEAD. Transport orchestrates both. This keeps layers independently testable.
+- **Epoch-as-nonce**: monotonic counter zero-padded to NonceSize with genome-derived prefix. Eliminates nonce reuse risk. No random nonces.
+- **SHA-256 counter mode for PRNG** (not `math/rand`): algorithm stability across Go versions is critical for cross-platform genome determinism.
+- **Odd/even StreamIDs**: client=odd, server=even. No handshake needed for ID coordination.
+- **Single external dep**: only `golang.org/x/crypto`. `golang.org/x/net` is test-only (SOCKS5 client).
+- **UDP MTU budget**: MSS must account for morph header + AEAD overhead + max padding. Safe payload ~1050-1100 bytes per packet.
+
+## Important invariants
+
+- Same PSK + same code version = identical genome on any platform. If you change `internal/randutil` or `morph/genome.go`, verify cross-platform determinism.
+- `morph.Encoder.Encode` output must be indistinguishable from random. The entropy test in `morph/morph_test.go` (`TestFrameEntropy`) must pass >= 7.9 bits/byte.
+- Anti-replay window in `transport/tunnel.go` rejects epoch 0 and epochs outside the sliding window.
+- `mux.Session.recvLoop` runs independently of any stream's Write path — this prevents deadlocks where both sides block on flow control.
+- All per-stream goroutines (retransmit loop) are tied to `stream.done` channel and stop on Close.
+
+## Code style
+
+- Pure Go, minimal dependencies.
+- No global state. Configuration passed explicitly.
+- `log/slog` for structured logging.
+- Errors wrapped with `fmt.Errorf("package: context: %w", err)`.
+- No generics unless they clearly simplify. Interfaces for testability (`mux.TransportConn`, `mux.CongestionController`).
+
+## File layout
+
+```
+genome/
+├── cmd/{client,server}/main.go   # entry points
+├── config/config.go              # JSON + flags
+├── crypto/{aead,keys}.go         # AEAD + HKDF
+├── internal/randutil/            # deterministic PRNG
+├── internal/logger/              # slog wrapper
+├── morph/{genome,frame,lengthcodec,padding}.go  # polymorphism core
+├── mux/{command,stream,session,reliability,congestion,flowcontrol}.go
+├── proxy/{client,server}.go      # SOCKS5 <-> mux bridge
+├── socks5/server.go              # SOCKS5 CONNECT
+└── transport/{tunnel,shaper}.go  # UDP + morph + AEAD
+```
+
+## Extending
+
+- **Add ECDH handshake (Elligator2)**: add `handshake/` package. Derive ephemeral salt from key exchange, pass to `crypto.DeriveSessionKeys`. The genome changes per-session automatically.
+- **Add BBR congestion control**: implement `mux.CongestionController` interface in `mux/congestion.go`. Session already uses the interface.
+- **Add protocol mimicry**: extend `morph/genome.go` to optionally prepend TLS/HTTP headers. Keep it behind a genome flag.
+- **Add UDP ASSOCIATE to SOCKS5**: extend `socks5/server.go` with command 0x03 handler.
