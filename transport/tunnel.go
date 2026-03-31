@@ -2,6 +2,8 @@ package transport
 
 import (
 	"crypto/cipher"
+	crand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -41,6 +43,9 @@ type Tunnel struct {
 	replayBmp [replayWindowSize / 32]uint32
 
 	readTimeout time.Duration
+
+	// onDrop is an optional callback for debugging dropped packets.
+	onDrop func(reason string, err error)
 }
 
 // NewTunnel creates a tunnel over an existing UDP connection.
@@ -60,7 +65,17 @@ func NewTunnel(conn *net.UDPConn, peer *net.UDPAddr, aead cipher.AEAD,
 		shaper:      shaper,
 		readTimeout: defaultReadTimeout,
 	}
+	// Start epoch at a random value so reconnects don't collide
+	// with the server's replay window from a previous session.
+	var rnd [4]byte
+	crand.Read(rnd[:])
+	t.epoch.Store(binary.BigEndian.Uint32(rnd[:]) >> 1) // top half of uint32 range
 	return t
+}
+
+// SetDropCallback sets a callback invoked when a packet is dropped.
+func (t *Tunnel) SetDropCallback(fn func(reason string, err error)) {
+	t.onDrop = fn
 }
 
 // SetReadTimeout sets the UDP read deadline duration.
@@ -150,12 +165,17 @@ func (t *Tunnel) Receive() ([]byte, error) {
 		// Decode frame.
 		frame, err := t.decoder.Decode(buf[:n])
 		if err != nil {
-			// Silently drop invalid packets (could be probes or noise).
+			if t.onDrop != nil {
+				t.onDrop("decode", err)
+			}
 			continue
 		}
 
 		// Anti-replay check.
 		if !t.replayCheck(frame.Epoch) {
+			if t.onDrop != nil {
+				t.onDrop("replay", fmt.Errorf("epoch %d rejected", frame.Epoch))
+			}
 			continue
 		}
 
@@ -170,7 +190,9 @@ func (t *Tunnel) Receive() ([]byte, error) {
 		// Decrypt.
 		plaintext, err := t.aead.Open(nil, frame.Nonce, sealed, ad)
 		if err != nil {
-			// Authentication failed — drop silently.
+			if t.onDrop != nil {
+				t.onDrop("aead", err)
+			}
 			continue
 		}
 

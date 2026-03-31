@@ -105,6 +105,9 @@ func main() {
 
 	shaper := transport.NewShaper(0, 0)
 	tunnel := transport.NewTunnel(conn, peerUDP, aead, keys.NonceBase, genome, shaper)
+	tunnel.SetDropCallback(func(reason string, err error) {
+		log.Warn("packet dropped", "reason", reason, "err", err)
+	})
 
 	session := mux.NewSession(tunnel, true, log)
 	if cfg.IdleTimeout() > 0 {

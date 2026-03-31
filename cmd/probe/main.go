@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -18,11 +19,10 @@ func main() {
 		return
 	}
 	serverAddr := os.Args[1]
-	pskHex := os.Args[2]
-
-	psk := make([]byte, len(pskHex)/2)
-	for i := 0; i < len(psk); i++ {
-		fmt.Sscanf(pskHex[i*2:i*2+2], "%02x", &psk[i])
+	psk, err := hex.DecodeString(os.Args[2])
+	if err != nil {
+		fmt.Println("invalid PSK hex:", err)
+		return
 	}
 
 	keys, err := crypto.DeriveSessionKeys(psk, nil, crypto.CipherChaCha20Poly1305)
@@ -66,8 +66,11 @@ func main() {
 	shaper := transport.NewShaper(0, 0)
 	tunnel := transport.NewTunnel(conn, peerUDP, aead, keys.NonceBase, genome, shaper)
 	tunnel.SetReadTimeout(10 * time.Second)
+	tunnel.SetDropCallback(func(reason string, err error) {
+		fmt.Printf("  [DROP] reason=%s err=%v\n", reason, err)
+	})
 
-	// Send an OPEN command (like a real client would).
+	// Send OPEN command.
 	cmd := &mux.Command{
 		Type:     mux.CmdOpen,
 		StreamID: 1,
@@ -80,26 +83,27 @@ func main() {
 		return
 	}
 
-	fmt.Printf("Sending OPEN command (%d bytes) to %s...\n", len(data), serverAddr)
+	fmt.Printf("Sending OPEN to %s...\n", serverAddr)
 	if err := tunnel.Send(data); err != nil {
 		fmt.Println("send error:", err)
 		return
 	}
-	fmt.Println("Sent OK. Waiting for response...")
+	fmt.Println("Sent. Waiting 10s for responses (will show all drops)...")
 
-	resp, err := tunnel.Receive()
-	if err != nil {
-		fmt.Println("receive error:", err)
-		fmt.Println(">>> Server is NOT responding. Check firewall / server logs.")
-		return
+	for i := 0; i < 3; i++ {
+		resp, err := tunnel.Receive()
+		if err != nil {
+			fmt.Println("receive error:", err)
+			break
+		}
+		respCmd, err := mux.DecodeCommand(resp)
+		if err != nil {
+			fmt.Printf("got %d bytes, decode failed: %v\n", len(resp), err)
+			continue
+		}
+		fmt.Printf(">>> Response: type=0x%02x stream=%d\n", respCmd.Type, respCmd.StreamID)
+		if respCmd.Type == mux.CmdData {
+			fmt.Printf("    data (%d bytes): %q\n", len(respCmd.Data), string(respCmd.Data))
+		}
 	}
-
-	respCmd, err := mux.DecodeCommand(resp)
-	if err != nil {
-		fmt.Printf("Got %d bytes back but decode failed: %v\n", len(resp), err)
-		return
-	}
-
-	fmt.Printf(">>> Got response: type=0x%02x stream=%d\n", respCmd.Type, respCmd.StreamID)
-	fmt.Println(">>> Tunnel is working!")
 }

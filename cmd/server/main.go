@@ -91,6 +91,9 @@ func main() {
 
 	shaper := transport.NewShaper(0, 0) // no shaping on server
 	tunnel := transport.NewTunnel(conn, nil, aead, keys.NonceBase, genome, shaper)
+	tunnel.SetDropCallback(func(reason string, err error) {
+		log.Warn("packet dropped", "reason", reason, "err", err)
+	})
 
 	session := mux.NewSession(tunnel, false, log)
 	session.SetIdleTimeout(0) // server waits forever for clients
