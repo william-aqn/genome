@@ -75,28 +75,40 @@ fi
 # --- Download binary ---
 download_binary() {
     info "Downloading ${BINARY_NAME}..."
+    info "URL: ${BINARY_URL}"
 
-    # Try GitHub release first.
-    if curl -fsSL --max-time 30 -o "${BINARY_PATH}" "${BINARY_URL}" 2>/dev/null; then
+    # Try GitHub release.
+    DL_ERR=$(curl -fSL --max-time 30 -o "${BINARY_PATH}" "${BINARY_URL}" 2>&1) && {
         chmod +x "${BINARY_PATH}"
         info "Installed to ${BINARY_PATH}"
         return
-    fi
+    }
+    warn "Direct download failed: ${DL_ERR}"
 
-    # GitHub may be blocked — try direct download via GitHub API with redirect.
-    DIRECT_URL="https://api.github.com/repos/${REPO}/releases/latest"
-    ASSET_URL=$(curl -fsSL --max-time 10 "$DIRECT_URL" 2>/dev/null \
+    # GitHub may be blocked — try via API.
+    info "Trying GitHub API..."
+    API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+    API_RESP=$(curl -fsSL --max-time 10 "$API_URL" 2>&1) || {
+        warn "API request failed: ${API_RESP}"
+    }
+    ASSET_URL=$(echo "$API_RESP" \
         | grep -o "\"browser_download_url\"[^\"]*\"[^\"]*${BINARY_NAME}\"" \
         | grep -o 'https://[^"]*' || true)
-    if [ -n "$ASSET_URL" ] && curl -fsSL --max-time 30 -o "${BINARY_PATH}" "$ASSET_URL" 2>/dev/null; then
-        chmod +x "${BINARY_PATH}"
-        info "Installed to ${BINARY_PATH}"
-        return
+    if [ -n "$ASSET_URL" ]; then
+        info "Asset URL: ${ASSET_URL}"
+        DL_ERR2=$(curl -fSL --max-time 30 -o "${BINARY_PATH}" "$ASSET_URL" 2>&1) && {
+            chmod +x "${BINARY_PATH}"
+            info "Installed to ${BINARY_PATH}"
+            return
+        }
+        warn "API download failed: ${DL_ERR2}"
+    else
+        warn "Could not find asset URL in API response"
     fi
 
     # Fallback: build from source if Go is available.
     if command -v go >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
-        warn "Download failed. Building from source..."
+        warn "Downloading failed. Building from source..."
         BUILD_TMP=$(mktemp -d)
         trap "rm -rf ${BUILD_TMP}" EXIT
         info "Cloning repo..."
@@ -109,9 +121,8 @@ download_binary() {
         info "Built and installed to ${BINARY_PATH}"
     else
         echo ""
-        fail "Download failed (GitHub may be blocked). Upload the binary manually:\n\n" \
-             "  On your local machine:\n" \
-             "    scp dist/chameleon-server-linux-amd64 root@YOUR_SERVER:${BINARY_PATH}\n\n" \
+        fail "Download failed. Upload the binary manually:\n\n" \
+             "  scp chameleon-server-linux-amd64 root@THIS_SERVER:${BINARY_PATH}\n\n" \
              "  Then re-run this script."
     fi
 }
