@@ -10,29 +10,45 @@ Chameleon (`genome`) — polymorphic UDP tunneling protocol in Go. Every session
 2. **`crypto/`** — HKDF-SHA256 key derivation from PSK. AEAD: ChaCha20-Poly1305 (12-byte nonce), XChaCha20-Poly1305 (24-byte nonce), AES-256-GCM. Nonce = genome-derived prefix || epoch (big-endian uint32).
 3. **`morph/`** — Core polymorphism. `Derive(seed) -> *Genome` generates the wire format: magic byte, field order (Fisher-Yates), 0-3 decoy fields, nonce size 12/24, length encoding (BE/LE/varint/XOR), padding range. `Encoder`/`Decoder` handle frame serialization. Morph layer is crypto-agnostic — it never calls AEAD directly.
 4. **`mux/`** — Stream multiplexer over `TransportConn` interface. Commands: OPEN, DATA, CLOSE, ACK. Full reliable delivery: per-stream sequence numbers, SACK, fast retransmit (3 dup ACKs), RTT estimation (Jacobson/Karels), NewReno congestion control, per-stream flow control. StreamID allocation: client=odd, server=even.
-5. **`transport/`** — UDP tunnel glue: `payload -> AEAD.Seal -> morph.Encode -> UDP`. Anti-replay sliding window (256 epochs). Server discovers peer from first valid packet.
+5. **`transport/`** — UDP tunnel glue: `payload -> AEAD.Seal -> morph.Encode -> UDP`. Anti-replay sliding window (256 epochs). Random initial epoch prevents replay rejection on reconnect. Server discovers peer from first valid packet. UDP read timeouts are non-fatal (retry loop).
 6. **`socks5/`** — RFC 1928 SOCKS5, CONNECT only, no-auth. Hands off to `ConnectHandler`.
 7. **`proxy/`** — Client: SOCKS5 -> `session.Open` -> bidirectional relay. Server: `session.Accept` -> `net.Dial` -> relay.
 8. **`config/`** — JSON config + CLI flags. PSK is hex-encoded.
-9. **`cmd/client/`, `cmd/server/`** — Entry points with graceful shutdown (SIGINT/SIGTERM).
+9. **`cmd/client/`, `cmd/server/`** — Entry points with graceful shutdown (SIGINT/SIGTERM). Drop callback logging for diagnostics.
+10. **`cmd/probe/`** — Tunnel diagnostic tool: sends one OPEN and prints server response / drop reasons.
 
-## Build and test
+## Build, test, deploy
 
 ```bash
 go build ./...            # build all
 go test ./... -v          # run all tests
 go test ./... -count=1    # no cache
 go test ./proxy/ -v       # integration tests (end-to-end through tunnel)
+
+bash build.sh             # cross-compile linux/windows amd64/arm64 → dist/
+bash test.sh              # vet + unit + integration + race detector
+bash e2e-test.sh          # build, start client+server, curl through tunnel
+bash release.sh v0.2.0    # build + create GitHub release with binaries
 ```
+
+### Server deployment (one line)
+```bash
+curl -sSL https://raw.githubusercontent.com/william-aqn/genome/main/install-server.sh | sudo bash
+```
+Installs binary, generates PSK, opens firewall, creates systemd service.
+Re-running upgrades the binary only (preserves PSK/config/port).
 
 ## Key design decisions
 
 - **Morph is crypto-agnostic**: frame encode/decode never touches AEAD. Transport orchestrates both. This keeps layers independently testable.
 - **Epoch-as-nonce**: monotonic counter zero-padded to NonceSize with genome-derived prefix. Eliminates nonce reuse risk. No random nonces.
+- **Random initial epoch**: each tunnel starts from a random epoch to prevent replay window collisions when a client reconnects to a running server.
 - **SHA-256 counter mode for PRNG** (not `math/rand`): algorithm stability across Go versions is critical for cross-platform genome determinism.
 - **Odd/even StreamIDs**: client=odd, server=even. No handshake needed for ID coordination.
 - **Single external dep**: only `golang.org/x/crypto`. `golang.org/x/net` is test-only (SOCKS5 client).
 - **UDP MTU budget**: MSS must account for morph header + AEAD overhead + max padding. Safe payload ~1050-1100 bytes per packet.
+- **Server never times out**: idle timeout disabled on server; it waits for clients indefinitely. UDP read timeouts retry instead of crashing.
+- **No -s -w in ldflags**: stripped Go binaries trigger Kaspersky false positives. Keep debug symbols.
 
 ## Important invariants
 
@@ -55,6 +71,7 @@ go test ./proxy/ -v       # integration tests (end-to-end through tunnel)
 ```
 genome/
 ├── cmd/{client,server}/main.go   # entry points
+├── cmd/probe/main.go             # tunnel diagnostics
 ├── config/config.go              # JSON + flags
 ├── crypto/{aead,keys}.go         # AEAD + HKDF
 ├── internal/randutil/            # deterministic PRNG
@@ -63,7 +80,12 @@ genome/
 ├── mux/{command,stream,session,reliability,congestion,flowcontrol}.go
 ├── proxy/{client,server}.go      # SOCKS5 <-> mux bridge
 ├── socks5/server.go              # SOCKS5 CONNECT
-└── transport/{tunnel,shaper}.go  # UDP + morph + AEAD
+├── transport/{tunnel,shaper}.go  # UDP + morph + AEAD
+├── build.sh                      # cross-compile
+├── test.sh                       # full test suite
+├── e2e-test.sh                   # live tunnel test
+├── release.sh                    # GitHub release
+└── install-server.sh             # one-line server deploy
 ```
 
 ## Extending
