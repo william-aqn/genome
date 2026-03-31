@@ -209,10 +209,17 @@ func (t *Tunnel) Receive() ([]byte, error) {
 			continue
 		}
 
-		// Valid packet from this address — update peer if unknown.
+		// Valid packet — update peer. If peer changed (reconnect from
+		// different source port), reset the replay window.
 		t.peerMu.Lock()
 		if t.peer == nil {
 			t.peer = addr
+		} else if t.peer.String() != addr.String() {
+			t.peer = addr
+			t.replayMu.Lock()
+			t.replayBmp = [replayWindowSize / 32]uint32{}
+			t.replayMax = 0
+			t.replayMu.Unlock()
 		}
 		t.peerMu.Unlock()
 
