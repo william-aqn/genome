@@ -74,6 +74,11 @@ IS_UPGRADE=false
 if [ -f "${BINARY_PATH}" ] && [ -f "${CONFIG_DIR}/psk" ]; then
     IS_UPGRADE=true
     info "Existing installation detected — upgrading binary only."
+    # Stop running service before overwriting binary (Linux: "Text file busy").
+    if has_systemd && systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        info "Stopping ${SERVICE_NAME}..."
+        systemctl stop "${SERVICE_NAME}"
+    fi
 fi
 
 # --- Download binary ---
