@@ -2,6 +2,7 @@ package transport
 
 import (
 	"crypto/cipher"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -138,6 +139,11 @@ func (t *Tunnel) Receive() ([]byte, error) {
 		t.conn.SetReadDeadline(time.Now().Add(t.readTimeout))
 		n, addr, err := t.conn.ReadFromUDP(buf)
 		if err != nil {
+			// Timeout is not fatal — just retry.
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
 			return nil, fmt.Errorf("transport: UDP read: %w", err)
 		}
 

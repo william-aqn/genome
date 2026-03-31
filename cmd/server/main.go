@@ -93,9 +93,7 @@ func main() {
 	tunnel := transport.NewTunnel(conn, nil, aead, keys.NonceBase, genome, shaper)
 
 	session := mux.NewSession(tunnel, false, log)
-	if cfg.IdleTimeout() > 0 {
-		session.SetIdleTimeout(cfg.IdleTimeout())
-	}
+	session.SetIdleTimeout(0) // server waits forever for clients
 
 	srv := proxy.NewServer(session, log)
 

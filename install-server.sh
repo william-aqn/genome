@@ -115,6 +115,33 @@ EOF
 chmod 600 "$CONFIG_FILE"
 info "Config → ${CONFIG_FILE}"
 
+# --- Firewall ---
+open_firewall() {
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
+        info "Opening UDP port ${PORT} in ufw..."
+        ufw allow "${PORT}/udp" >/dev/null
+    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        info "Opening UDP port ${PORT} in firewalld..."
+        firewall-cmd --permanent --add-port="${PORT}/udp" >/dev/null
+        firewall-cmd --reload >/dev/null
+    elif command -v iptables >/dev/null 2>&1; then
+        # Only add if rule doesn't already exist.
+        if ! iptables -C INPUT -p udp --dport "${PORT}" -j ACCEPT 2>/dev/null; then
+            info "Opening UDP port ${PORT} in iptables..."
+            iptables -A INPUT -p udp --dport "${PORT}" -j ACCEPT
+            # Persist if possible.
+            if command -v netfilter-persistent >/dev/null 2>&1; then
+                netfilter-persistent save 2>/dev/null || true
+            elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
+                iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+            fi
+        fi
+    else
+        warn "No firewall manager found. Make sure UDP port ${PORT} is open."
+    fi
+}
+open_firewall
+
 # --- Systemd service ---
 if has_systemd; then
     info "Installing systemd service..."

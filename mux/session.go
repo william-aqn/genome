@@ -274,6 +274,9 @@ func (s *Session) keepaliveLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
+			if s.idleTimeout <= 0 {
+				continue // idle timeout disabled
+			}
 			idle := time.Since(time.Unix(0, s.lastActivity.Load()))
 			if idle >= s.idleTimeout {
 				s.logger.Info("session idle timeout", "idle", idle)
