@@ -29,6 +29,10 @@ type Config struct {
 	// "chacha20" (default) or "aes256gcm".
 	CipherSuiteName string `json:"cipher_suite,omitempty"`
 
+	// SOCKS5 authentication (client only). If both set, RFC 1929 auth is required.
+	SOCKSUser string `json:"socks_user,omitempty"`
+	SOCKSPass string `json:"socks_pass,omitempty"`
+
 	// LogLevel: "debug", "info", "warn", "error".
 	LogLevel string `json:"log_level,omitempty"`
 

@@ -93,8 +93,8 @@ func TestEndToEnd(t *testing.T) {
 	defer cancel()
 	go srv.Run(ctx)
 
-	// 6. Start client proxy (SOCKS5).
-	client := NewClient("127.0.0.1:0", clientSession, logger)
+	// 6. Start client proxy (SOCKS5 with auth).
+	client := NewClient("127.0.0.1:0", clientSession, logger, "testuser", "testpass")
 	go client.Run(ctx)
 	time.Sleep(100 * time.Millisecond)
 
@@ -104,8 +104,9 @@ func TestEndToEnd(t *testing.T) {
 	}
 	t.Logf("SOCKS5 at %s", socksAddr)
 
-	// 7. Make HTTP request through SOCKS5 proxy.
-	dialer, err := proxy.SOCKS5("tcp", socksAddr.String(), nil, proxy.Direct)
+	// 7. Make HTTP request through SOCKS5 proxy with credentials.
+	auth := proxy.Auth{User: "testuser", Password: "testpass"}
+	dialer, err := proxy.SOCKS5("tcp", socksAddr.String(), &auth, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,11 +192,12 @@ func TestConcurrentStreams(t *testing.T) {
 	defer cancel()
 	go srv.Run(ctx)
 
-	client := NewClient("127.0.0.1:0", clientSess, logger)
+	client := NewClient("127.0.0.1:0", clientSess, logger, "user2", "pass2")
 	go client.Run(ctx)
 	time.Sleep(100 * time.Millisecond)
 
-	dialer, _ := proxy.SOCKS5("tcp", client.SOCKSAddr().String(), nil, proxy.Direct)
+	auth2 := proxy.Auth{User: "user2", Password: "pass2"}
+	dialer, _ := proxy.SOCKS5("tcp", client.SOCKSAddr().String(), &auth2, proxy.Direct)
 	httpClient := &http.Client{
 		Transport: &http.Transport{Dial: dialer.Dial},
 		Timeout:   10 * time.Second,

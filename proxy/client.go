@@ -19,13 +19,17 @@ type Client struct {
 	logger  *slog.Logger
 }
 
-// NewClient creates a client proxy.
-func NewClient(socksAddr string, session *mux.Session, logger *slog.Logger) *Client {
+// NewClient creates a client proxy. If username/password are non-empty,
+// SOCKS5 will require RFC 1929 authentication.
+func NewClient(socksAddr string, session *mux.Session, logger *slog.Logger, username, password string) *Client {
 	c := &Client{
 		session: session,
 		logger:  logger,
 	}
 	c.socks = socks5.New(socksAddr, c.handleConnect, logger)
+	if username != "" && password != "" {
+		c.socks.SetAuth(username, password)
+	}
 	return c
 }
 

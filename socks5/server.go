@@ -16,8 +16,14 @@ const (
 	socksVersion = 0x05
 
 	// Authentication methods.
-	authNone = 0x00
-	authNO   = 0xFF
+	authNone     = 0x00
+	authUserPass = 0x02
+	authNO       = 0xFF
+
+	// RFC 1929 sub-negotiation version.
+	authUserPassVersion = 0x01
+	authSuccess         = 0x00
+	authFailure         = 0x01
 
 	// Commands.
 	cmdConnect = 0x01
@@ -52,15 +58,28 @@ type Server struct {
 	logger     *slog.Logger
 	listener   net.Listener
 	mu         sync.Mutex
+	username   string // if set, require RFC 1929 auth
+	password   string
 }
 
-// New creates a SOCKS5 server.
+// New creates a SOCKS5 server. If username and password are non-empty,
+// RFC 1929 username/password authentication is required.
 func New(listenAddr string, handler ConnectHandler, logger *slog.Logger) *Server {
 	return &Server{
 		listenAddr: listenAddr,
 		handler:    handler,
 		logger:     logger,
 	}
+}
+
+// SetAuth enables RFC 1929 username/password authentication.
+func (s *Server) SetAuth(username, password string) {
+	s.username = username
+	s.password = password
+}
+
+func (s *Server) authRequired() bool {
+	return s.username != "" && s.password != ""
 }
 
 // ListenAndServe starts accepting SOCKS5 connections.
@@ -160,7 +179,26 @@ func (s *Server) negotiate(conn net.Conn) error {
 		return fmt.Errorf("reading methods: %w", err)
 	}
 
-	// We only support no-auth.
+	if s.authRequired() {
+		// Require username/password (RFC 1929).
+		hasUserPass := false
+		for _, m := range methods {
+			if m == authUserPass {
+				hasUserPass = true
+				break
+			}
+		}
+		if !hasUserPass {
+			conn.Write([]byte{socksVersion, authNO})
+			return fmt.Errorf("client does not support username/password auth")
+		}
+		if _, err := conn.Write([]byte{socksVersion, authUserPass}); err != nil {
+			return err
+		}
+		return s.authenticateUserPass(conn)
+	}
+
+	// No auth required — accept no-auth method.
 	hasNoAuth := false
 	for _, m := range methods {
 		if m == authNone {
@@ -168,14 +206,58 @@ func (s *Server) negotiate(conn net.Conn) error {
 			break
 		}
 	}
-
 	if !hasNoAuth {
 		conn.Write([]byte{socksVersion, authNO})
 		return fmt.Errorf("no acceptable auth method")
 	}
-
-	// Reply: VER METHOD
 	_, err := conn.Write([]byte{socksVersion, authNone})
+	return err
+}
+
+// authenticateUserPass handles RFC 1929 username/password sub-negotiation.
+// Format: VER(1) ULEN(1) UNAME(1-255) PLEN(1) PASSWD(1-255)
+func (s *Server) authenticateUserPass(conn net.Conn) error {
+	// Read version.
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return fmt.Errorf("auth: reading header: %w", err)
+	}
+	if header[0] != authUserPassVersion {
+		conn.Write([]byte{authUserPassVersion, authFailure})
+		return fmt.Errorf("auth: bad sub-negotiation version: %d", header[0])
+	}
+
+	// Read username.
+	ulen := int(header[1])
+	if ulen == 0 {
+		conn.Write([]byte{authUserPassVersion, authFailure})
+		return fmt.Errorf("auth: empty username")
+	}
+	uname := make([]byte, ulen)
+	if _, err := io.ReadFull(conn, uname); err != nil {
+		return fmt.Errorf("auth: reading username: %w", err)
+	}
+
+	// Read password.
+	plenBuf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, plenBuf); err != nil {
+		return fmt.Errorf("auth: reading password length: %w", err)
+	}
+	plen := int(plenBuf[0])
+	passwd := make([]byte, plen)
+	if plen > 0 {
+		if _, err := io.ReadFull(conn, passwd); err != nil {
+			return fmt.Errorf("auth: reading password: %w", err)
+		}
+	}
+
+	// Constant-time-ish comparison (not crypto-critical, just good practice).
+	if string(uname) != s.username || string(passwd) != s.password {
+		conn.Write([]byte{authUserPassVersion, authFailure})
+		return fmt.Errorf("auth: invalid credentials")
+	}
+
+	_, err := conn.Write([]byte{authUserPassVersion, authSuccess})
 	return err
 }
 

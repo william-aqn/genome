@@ -25,6 +25,8 @@ func main() {
 		cfgPath    = flag.String("config", "", "path to config JSON file")
 		serverAddr = flag.String("server", "", "server UDP address (host:port)")
 		socksAddr  = flag.String("socks", "127.0.0.1:1080", "SOCKS5 listen address")
+		socksUser  = flag.String("socks-user", "", "SOCKS5 username (enables auth)")
+		socksPass  = flag.String("socks-pass", "", "SOCKS5 password (enables auth)")
 		pskHex     = flag.String("psk", "", "pre-shared key (hex)")
 		cipher     = flag.String("cipher", "chacha20", "cipher suite: chacha20 or aes256gcm")
 		logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")
@@ -45,6 +47,8 @@ func main() {
 			ListenAddr:      ":0", // ephemeral port for client
 			PeerAddr:        *serverAddr,
 			SOCKSAddr:       *socksAddr,
+			SOCKSUser:       *socksUser,
+			SOCKSPass:       *socksPass,
 			CipherSuiteName: *cipher,
 			LogLevel:        *logLevel,
 		}
@@ -114,7 +118,7 @@ func main() {
 		session.SetIdleTimeout(cfg.IdleTimeout())
 	}
 
-	client := proxy.NewClient(cfg.SOCKSAddr, session, log)
+	client := proxy.NewClient(cfg.SOCKSAddr, session, log, cfg.SOCKSUser, cfg.SOCKSPass)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
