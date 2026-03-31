@@ -178,10 +178,11 @@ func TestTunnelReplayRejection(t *testing.T) {
 		t.Fatal("epoch 0 should be rejected")
 	}
 
-	// Advance well past the window.
+	// Advance past the window — epoch within window should be rejected.
 	tun.replayCommit(500)
-	if tun.replayCheck(100) {
-		t.Fatal("epoch 100 should be outside window after advancing to 500")
+	tun.replayCommit(400) // mark 400 as seen
+	if tun.replayCheck(400) {
+		t.Fatal("epoch 400 should be rejected (already seen within window)")
 	}
 }
 

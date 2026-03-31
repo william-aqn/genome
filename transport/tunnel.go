@@ -233,17 +233,22 @@ func (t *Tunnel) replayCheck(epoch uint32) bool {
 		return false
 	}
 
+	// New epoch above current max — always accept.
 	if epoch > t.replayMax {
-		return true // new high, will be committed later
+		return true
 	}
 
-	// Check if within window.
+	// If epoch is far below replayMax, this is likely a new client session
+	// with a different random starting epoch. Reset the window.
 	diff := t.replayMax - epoch
 	if diff >= replayWindowSize {
-		return false // too old
+		// Reset — treat as a new session.
+		t.replayBmp = [replayWindowSize / 32]uint32{}
+		t.replayMax = 0
+		return true
 	}
 
-	// Check bitmap.
+	// Within window — check bitmap for duplicates.
 	idx := epoch % replayWindowSize
 	word := idx / 32
 	bit := idx % 32
