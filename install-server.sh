@@ -8,6 +8,10 @@
 #
 set -euo pipefail
 
+INSTALLER_VERSION="0.1.1"
+echo "Chameleon installer v${INSTALLER_VERSION}"
+echo ""
+
 # --- Defaults ---
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/chameleon"
