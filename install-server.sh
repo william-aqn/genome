@@ -61,30 +61,74 @@ need_cmd openssl
 ARCH=$(detect_arch)
 info "Detected architecture: linux/${ARCH}"
 
-# --- Download binary ---
+# --- Detect existing installation ---
 BINARY_NAME="chameleon-server-linux-${ARCH}"
 BINARY_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
 BINARY_PATH="${INSTALL_DIR}/${SERVICE_NAME}"
+IS_UPGRADE=false
 
-info "Downloading ${BINARY_NAME}..."
-if curl -fsSL -o "${BINARY_PATH}" "${BINARY_URL}" 2>/dev/null; then
-    chmod +x "${BINARY_PATH}"
-    info "Installed to ${BINARY_PATH}"
-else
-    warn "Download failed. Trying to build from source..."
-    need_cmd go
-    need_cmd git
+if [ -f "${BINARY_PATH}" ] && [ -f "${CONFIG_DIR}/psk" ]; then
+    IS_UPGRADE=true
+    info "Existing installation detected — upgrading binary only."
+fi
 
-    TMPDIR=$(mktemp -d)
-    trap "rm -rf ${TMPDIR}" EXIT
-    info "Cloning repo..."
-    git clone --depth 1 "https://github.com/${REPO}.git" "${TMPDIR}/genome"
-    cd "${TMPDIR}/genome"
-    info "Building..."
-    go build -trimpath -o "${BINARY_PATH}" ./cmd/server
-    chmod +x "${BINARY_PATH}"
-    cd /
-    info "Built and installed to ${BINARY_PATH}"
+# --- Download binary ---
+download_binary() {
+    info "Downloading ${BINARY_NAME}..."
+    if curl -fsSL -o "${BINARY_PATH}" "${BINARY_URL}" 2>/dev/null; then
+        chmod +x "${BINARY_PATH}"
+        info "Installed to ${BINARY_PATH}"
+    else
+        warn "Download failed. Trying to build from source..."
+        need_cmd go
+        need_cmd git
+
+        TMPDIR=$(mktemp -d)
+        trap "rm -rf ${TMPDIR}" EXIT
+        info "Cloning repo..."
+        git clone --depth 1 "https://github.com/${REPO}.git" "${TMPDIR}/genome"
+        cd "${TMPDIR}/genome"
+        info "Building..."
+        go build -trimpath -o "${BINARY_PATH}" ./cmd/server
+        chmod +x "${BINARY_PATH}"
+        cd /
+        info "Built and installed to ${BINARY_PATH}"
+    fi
+}
+download_binary
+
+# --- Upgrade: restart and exit early ---
+if [ "$IS_UPGRADE" = true ]; then
+    PSK=$(cat "${CONFIG_DIR}/psk")
+    # Read port from existing config.
+    if [ -f "${CONFIG_DIR}/server.json" ]; then
+        PORT=$(grep -o '"listen_addr"[^"]*":[0-9]*"' "${CONFIG_DIR}/server.json" | grep -o '[0-9]*' || echo "$PORT")
+    fi
+    if has_systemd && systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        systemctl restart "${SERVICE_NAME}"
+        sleep 1
+        if systemctl is-active --quiet "${SERVICE_NAME}"; then
+            info "Service restarted with new binary!"
+        else
+            warn "Restart may have failed. Check: journalctl -u ${SERVICE_NAME}"
+        fi
+    else
+        warn "Restart the server manually to use the new binary."
+    fi
+    EXTERNAL_IP=$(curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null \
+               || curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null \
+               || hostname -I 2>/dev/null | awk '{print $1}' \
+               || echo "YOUR_SERVER_IP")
+    echo ""
+    echo "=============================================="
+    echo "  Chameleon server upgraded!"
+    echo "=============================================="
+    echo ""
+    echo "  Server:  ${EXTERNAL_IP}:${PORT}"
+    echo "  PSK:     ${PSK}"
+    echo "  Binary:  ${BINARY_PATH}"
+    echo "=============================================="
+    exit 0
 fi
 
 # --- Generate PSK ---
