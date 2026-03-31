@@ -98,6 +98,12 @@ func main() {
 	session := mux.NewSession(tunnel, false, log)
 	session.SetIdleTimeout(0) // server waits forever for clients
 
+	// When peer address changes (client reconnect), close all old streams.
+	tunnel.SetPeerResetCallback(func() {
+		log.Info("peer address changed, resetting streams")
+		session.ResetStreams()
+	})
+
 	srv := proxy.NewServer(session, log)
 
 	ctx, cancel := context.WithCancel(context.Background())

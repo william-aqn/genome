@@ -48,8 +48,9 @@ type Tunnel struct {
 	onDrop func(reason string, err error)
 
 	// Optional stats callbacks.
-	onSend func(n int) // called with wire bytes sent
-	onRecv func(n int) // called with wire bytes received
+	onSend      func(n int) // called with wire bytes sent
+	onRecv      func(n int) // called with wire bytes received
+	onPeerReset func()      // called when peer address changes (client reconnect)
 }
 
 // NewTunnel creates a tunnel over an existing UDP connection.
@@ -86,6 +87,11 @@ func (t *Tunnel) SetDropCallback(fn func(reason string, err error)) {
 func (t *Tunnel) SetStatsCallbacks(onSend, onRecv func(int)) {
 	t.onSend = onSend
 	t.onRecv = onRecv
+}
+
+// SetPeerResetCallback sets a callback invoked when the peer address changes.
+func (t *Tunnel) SetPeerResetCallback(fn func()) {
+	t.onPeerReset = fn
 }
 
 // SetReadTimeout sets the UDP read deadline duration.
@@ -220,6 +226,9 @@ func (t *Tunnel) Receive() ([]byte, error) {
 			t.replayBmp = [replayWindowSize / 32]uint32{}
 			t.replayMax = 0
 			t.replayMu.Unlock()
+			if t.onPeerReset != nil {
+				t.onPeerReset()
+			}
 		}
 		t.peerMu.Unlock()
 

@@ -142,6 +142,22 @@ func (s *Session) Accept() (*Stream, error) {
 	}
 }
 
+// ResetStreams closes all existing streams (used when peer reconnects).
+func (s *Session) ResetStreams() {
+	s.streamsMu.Lock()
+	streams := make(map[uint32]*Stream, len(s.streams))
+	for k, v := range s.streams {
+		streams[k] = v
+	}
+	s.streamsMu.Unlock()
+
+	for _, stream := range streams {
+		stream.recvBuf.Close()
+		stream.cleanup()
+	}
+	s.logger.Info("all streams reset (peer reconnected)")
+}
+
 // Close gracefully shuts down the session and all streams.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
