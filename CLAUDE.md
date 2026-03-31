@@ -16,6 +16,7 @@ Chameleon (`genome`) — polymorphic UDP tunneling protocol in Go. Every session
 8. **`config/`** — JSON config + CLI flags. PSK is hex-encoded.
 9. **`cmd/client/`, `cmd/server/`** — Entry points with graceful shutdown (SIGINT/SIGTERM). Drop callback logging for diagnostics.
 10. **`cmd/probe/`** — Tunnel diagnostic tool: sends one OPEN and prints server response / drop reasons.
+11. **`internal/dashboard/`** — Real-time ANSI console dashboard for the client: traffic stats, active streams, requests, logs.
 
 ## Build, test, deploy
 
@@ -38,6 +39,13 @@ curl -sSL https://raw.githubusercontent.com/william-aqn/genome/main/install-serv
 Installs binary, generates PSK, opens firewall, creates systemd service.
 Re-running upgrades the binary only (preserves PSK/config/port).
 
+### Running client for debugging (from Claude Code)
+Always use `-no-ui` when launching the client from this terminal — the ANSI dashboard corrupts piped output. Use `-log debug` for full diagnostics:
+```bash
+./chameleon-client -no-ui -log debug -server HOST:PORT -psk PSK_HEX -socks 127.0.0.1:1080 -socks-user USER -socks-pass PASS
+```
+The client auto-loads `client.json` if it exists next to the executable — no flags needed for repeated runs.
+
 ## Key design decisions
 
 - **Morph is crypto-agnostic**: frame encode/decode never touches AEAD. Transport orchestrates both. This keeps layers independently testable.
@@ -49,6 +57,13 @@ Re-running upgrades the binary only (preserves PSK/config/port).
 - **UDP MTU budget**: MSS must account for morph header + AEAD overhead + max padding. Safe payload ~1050-1100 bytes per packet.
 - **Server never times out**: idle timeout disabled on server; it waits for clients indefinitely. UDP read timeouts retry instead of crashing.
 - **No -s -w in ldflags**: stripped Go binaries trigger Kaspersky false positives. Keep debug symbols.
+
+## Performance
+
+Measured on a real VDS (Russia -> Europe):
+- Download: ~2.16 Mbit/s
+- Upload: ~1.17 Mbit/s
+- Overhead: ~100-150 bytes/packet (morph header + AEAD tag + padding)
 
 ## Important invariants
 

@@ -58,33 +58,71 @@ curl -sSL https://raw.githubusercontent.com/william-aqn/genome/main/install-serv
 
 Повторный запуск обновляет только бинарник, сохраняя PSK, конфиг и порт.
 
-## Быстрый старт (ручная настройка)
+## Производительность
 
-### Генерация PSK
+Замеры на реальном сервере (VDS, Россия -> Европа):
 
-```bash
-PSK=$(openssl rand -hex 32)
+| Метрика | Значение |
+|---------|----------|
+| Входящая скорость | **2.16 Мбит/с** |
+| Исходящая скорость | **1.17 Мбит/с** |
+| Шифрование | ChaCha20-Poly1305 |
+| Overhead | ~100-150 байт/пакет (morph header + AEAD + padding) |
+
+## Клиент
+
+### Интерактивный режим (без параметров)
+
+```
+> chameleon-client.exe
+
+Chameleon Client — Interactive Setup
+
+  Server IP: YOUR_SERVER_IP
+  Server port [9000]: 10322
+  PSK (hex): 3e02d433...
+  SOCKS5 port [random=38741]:
+  SOCKS5 username [random=auto]:
+  SOCKS5 password [random=auto]:
+
+===========================================
+  SOCKS5 proxy:  127.0.0.1:38741
+  Username:      k7m2x9ab
+  Password:      p3nq8fw2v5jt
+  Server:        YOUR_SERVER_IP:10322
+===========================================
 ```
 
-### Сервер
+Конфиг сохраняется в `client.json` рядом с exe. При следующем запуске подхватывается автоматически — просто двойной клик.
+
+### С флагами
 
 ```bash
-go run ./cmd/server -listen :9000 -psk $PSK
+./chameleon-client -server SERVER_IP:9000 -psk $PSK -socks-user myuser -socks-pass mypass
 ```
 
-### Клиент
+### Консольный дашборд
+
+При запуске клиент показывает real-time дашборд с трафиком, активными соединениями и логами. Для отладки без UI:
 
 ```bash
-go run ./cmd/client -server SERVER_IP:9000 -socks 127.0.0.1:1080 -psk $PSK
+./chameleon-client -no-ui -log debug
 ```
 
 ### Использование
 
 ```bash
-# Любое приложение через SOCKS5
-curl --socks5 127.0.0.1:1080 https://example.com
+# curl через туннель
+curl --proxy socks5://user:pass@127.0.0.1:1080 https://example.com
 
-# Браузер: настроить SOCKS5-прокси на 127.0.0.1:1080
+# Браузер: настроить SOCKS5-прокси на 127.0.0.1:1080 с логином/паролем
+```
+
+## Сервер (ручная настройка)
+
+```bash
+PSK=$(openssl rand -hex 32)
+./chameleon-server -listen :9000 -psk $PSK
 ```
 
 ## Сборка
@@ -106,10 +144,13 @@ bash build.sh
 |------|-------------|----------|
 | `-psk` | | PSK в hex |
 | `-server` | | Адрес сервера (host:port) |
-| `-socks` | `127.0.0.1:1080` | Адрес SOCKS5-прокси |
+| `-socks` | случайный порт | Адрес SOCKS5-прокси |
+| `-socks-user` | случайный | SOCKS5 логин (RFC 1929) |
+| `-socks-pass` | случайный | SOCKS5 пароль |
 | `-cipher` | `chacha20` | `chacha20` или `aes256gcm` |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
-| `-config` | | Путь к JSON-конфигу |
+| `-no-ui` | `false` | Отключить дашборд, чистые логи |
+| `-config` | `client.json` | Путь к JSON-конфигу (авто-поиск рядом с exe) |
 
 ### Сервер
 
@@ -129,6 +170,8 @@ bash build.sh
   "listen_addr": ":9000",
   "peer_addr": "1.2.3.4:9000",
   "socks_addr": "127.0.0.1:1080",
+  "socks_user": "myuser",
+  "socks_pass": "mypass",
   "cipher_suite": "chacha20",
   "log_level": "info",
   "idle_timeout_sec": 300
