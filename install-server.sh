@@ -12,7 +12,7 @@ set -euo pipefail
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/chameleon"
 SERVICE_NAME="chameleon-server"
-PORT=9000
+PORT=$(shuf -i 10000-59999 -n 1)
 REPO="william-aqn/genome"
 
 # --- Parse args ---
