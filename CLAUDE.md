@@ -73,6 +73,15 @@ Measured on a real VDS (Russia -> Europe):
 - `mux.Session.recvLoop` runs independently of any stream's Write path — this prevents deadlocks where both sides block on flow control.
 - All per-stream goroutines (retransmit loop) are tied to `stream.done` channel and stop on Close.
 
+## Sensitive data policy
+
+**NEVER commit real IPs, PSKs, passwords, SSH keys, or any credentials to the repository.** Before every commit:
+- Check `git diff --staged` for IP addresses, hex keys, passwords, hostnames
+- Use placeholders: `YOUR_SERVER_IP`, `PSK_HEX`, `YOUR_PASSWORD`
+- The `deployment/` directory is gitignored — keep all real configs, keys, and connection scripts there
+- README examples must use only placeholder values
+- If sensitive data was accidentally committed, rewrite history with `git filter-repo` immediately
+
 ## Code style
 
 - Pure Go, minimal dependencies.
