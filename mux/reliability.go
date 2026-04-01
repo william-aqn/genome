@@ -178,6 +178,9 @@ func (sb *SendBuffer) AckSACK(sacks []SACKBlock) uint32 {
 			}
 		}
 	}
+	if ackedBytes > 0 {
+		sb.ackCond.Broadcast()
+	}
 	return ackedBytes
 }
 
@@ -265,26 +268,41 @@ func (sb *SendBuffer) Outstanding() uint32 {
 // WaitOutstandingBelow blocks until outstanding drops below limit or done closes.
 func (sb *SendBuffer) WaitOutstandingBelow(limit uint32, done <-chan struct{}) bool {
 	sb.mu.Lock()
-	defer sb.mu.Unlock()
+	if sb.outstanding < limit {
+		sb.mu.Unlock()
+		return true
+	}
+
+	// Start a ticker that periodically wakes the Cond as a safety net.
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-done:
+				sb.ackCond.Broadcast()
+				return
+			case <-ticker.C:
+				sb.ackCond.Broadcast()
+			}
+		}
+	}()
+
 	for sb.outstanding >= limit {
-		// Check done without blocking.
 		select {
 		case <-done:
+			sb.mu.Unlock()
+			close(stop)
 			return false
 		default:
 		}
-		// Wake on ACK or done.
-		ch := make(chan struct{})
-		go func() {
-			select {
-			case <-done:
-				sb.ackCond.Broadcast()
-			case <-ch:
-			}
-		}()
 		sb.ackCond.Wait()
-		close(ch)
 	}
+	sb.mu.Unlock()
+	close(stop)
 	return true
 }
 

@@ -106,6 +106,7 @@ func (s *Stream) Write(p []byte) (int, error) {
 		}
 
 		// Limit in-flight data to prevent UDP burst drops.
+		// 256 KB balances throughput vs packet loss on real links.
 		const maxOutstanding uint32 = 256 * 1024
 		if !s.sendBuf.WaitOutstandingBelow(maxOutstanding, s.done) {
 			return written, errStreamClosed
@@ -277,6 +278,8 @@ func (s *Stream) cleanup() {
 	default:
 		close(s.done)
 	}
+	// Wake any goroutine blocked in WaitOutstandingBelow.
+	s.sendBuf.ackCond.Broadcast()
 	s.session.removeStream(s.id)
 }
 
@@ -291,14 +294,14 @@ func (s *Stream) runRetransmitLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
-			// Trim acked segments from head to keep buffer bounded.
 			s.sendBuf.TrimAcked()
 
 			rto := s.rtt.RTO()
 			seg := s.sendBuf.GetOldestRetransmittable(rto)
 			if seg != nil && seg.Retransmits < 5 {
 				s.retransmit(seg)
-				s.rtt.BackoffRTO()
+				// Don't call OnTimeout here — it collapses cwnd on
+				// subsequent transfers. Rely on fast retransmit (3 dup ACKs).
 			}
 		}
 	}
