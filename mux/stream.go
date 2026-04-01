@@ -10,7 +10,6 @@ import (
 var (
 	errStreamClosed = errors.New("mux: stream closed")
 	errStreamReset  = errors.New("mux: stream reset")
-	errWindowFull   = errors.New("mux: send window full")
 )
 
 // streamState tracks the lifecycle of a stream.
@@ -23,8 +22,14 @@ const (
 	stateClosed
 )
 
+// maxOutstanding limits in-flight bytes per stream to prevent
+// UDP burst drops. Write blocks (via Cond) when outstanding exceeds this.
+// Set to 256 KB — enough for high throughput without overwhelming UDP.
+// At 1200 MSS this is ~213 packets in flight.
+const maxOutstanding uint32 = 256 * 1024
+
 // Stream represents a single multiplexed bidirectional byte stream.
-// It implements io.ReadWriteCloser.
+// Implements io.ReadWriteCloser.
 type Stream struct {
 	id      uint32
 	state   streamState
@@ -35,19 +40,20 @@ type Stream struct {
 	flow    *FlowController
 	rtt     *RTTEstimator
 
-	// session is used to send commands through the tunnel.
 	session *Session
 
-	// destAddr/destPort are set for streams opened via OPEN command.
 	destAddr string
 	destPort uint16
 
 	closeOnce sync.Once
 	done      chan struct{}
 
-	// dupAckCount tracks consecutive duplicate ACKs for fast retransmit.
+	// Fast retransmit state.
 	dupAckCount int
 	lastAckSeq  uint32
+
+	// Delayed ACK counter.
+	unackedCount int
 }
 
 func newStream(id uint32, sess *Session) *Stream {
@@ -66,13 +72,13 @@ func newStream(id uint32, sess *Session) *Stream {
 // ID returns the stream identifier.
 func (s *Stream) ID() uint32 { return s.id }
 
-// DestAddr returns the destination address (set for OPEN streams).
+// DestAddr returns the destination address.
 func (s *Stream) DestAddr() string { return s.destAddr }
 
 // DestPort returns the destination port.
 func (s *Stream) DestPort() uint16 { return s.destPort }
 
-// Read reads data from the stream. Blocks until data is available or stream is closed.
+// Read reads data from the stream. Blocks until data is available.
 func (s *Stream) Read(p []byte) (int, error) {
 	s.stateMu.RLock()
 	st := s.state
@@ -88,7 +94,8 @@ func (s *Stream) Read(p []byte) (int, error) {
 }
 
 // Write sends data on the stream. Segments into MSS-sized chunks.
-// Uses per-stream flow control only; congestion control is advisory.
+// Blocks when in-flight data exceeds maxOutstanding (256 KB) to prevent
+// UDP burst packet loss. Unblocked by AckTo/AckSACK via sendBuf.cond.
 func (s *Stream) Write(p []byte) (int, error) {
 	s.stateMu.RLock()
 	st := s.state
@@ -105,11 +112,9 @@ func (s *Stream) Write(p []byte) (int, error) {
 		default:
 		}
 
-		// Limit in-flight data to prevent UDP burst drops.
-		// 256 KB balances throughput vs packet loss on real links.
-		const maxOutstanding uint32 = 256 * 1024
-		if !s.sendBuf.WaitOutstandingBelow(maxOutstanding, s.done) {
-			return written, errStreamClosed
+		// Throttle: limit outstanding to prevent UDP burst drops.
+		if s.sendBuf.Outstanding() >= maxOutstanding {
+			s.sendBuf.WaitOutstandingBelowTimeout(maxOutstanding, 20*time.Millisecond)
 		}
 
 		chunk := p[written:]
@@ -128,7 +133,6 @@ func (s *Stream) Write(p []byte) (int, error) {
 			Seq:      seq,
 			Data:     data,
 		}
-
 		if err := s.session.sendCommand(cmd); err != nil {
 			return written, fmt.Errorf("mux: write: %w", err)
 		}
@@ -172,6 +176,7 @@ func (s *Stream) Close() error {
 }
 
 // handleData processes an incoming DATA command.
+// Sends ACK every ackInterval packets to avoid flooding the return channel.
 func (s *Stream) handleData(cmd *Command) {
 	s.stateMu.RLock()
 	st := s.state
@@ -180,19 +185,20 @@ func (s *Stream) handleData(cmd *Command) {
 		return
 	}
 
-	// Always accept data — don't drop on flow control violation.
-	// Flow control is advisory via ACK window; dropping causes hangs
-	// on large transfers when recv window depletes before Read drains.
-	dataLen := uint32(len(cmd.Data))
-	s.flow.Consume(dataLen) // best-effort tracking
-
+	s.flow.Consume(uint32(len(cmd.Data)))
 	s.recvBuf.Insert(cmd.Seq, cmd.Data)
-	s.sendAck()
+
+	// Delayed ACK: send every 32 packets or when recv window is low.
+	s.unackedCount++
+	if s.unackedCount >= 32 || s.flow.RecvWindow() < DefaultRecvWindow/4 {
+		s.sendAck()
+		s.unackedCount = 0
+	}
 }
 
 // handleAck processes an incoming ACK command.
 func (s *Stream) handleAck(cmd *Command) {
-	// RTT sample (Karn's algorithm: only from non-retransmitted segments).
+	// RTT sample (Karn's algorithm).
 	if sample, ok := s.sendBuf.RTTSample(cmd.AckSeq); ok {
 		s.rtt.Update(sample)
 		s.session.congestion.OnAck(0, sample)
@@ -243,18 +249,14 @@ func (s *Stream) handleClose() {
 	}
 }
 
-// sendAck sends an ACK command with the current receive state.
+// sendAck sends an ACK with the current receive state.
 func (s *Stream) sendAck() {
-	nextSeq := s.recvBuf.NextExpected()
-	sacks := s.recvBuf.SACKBlocks()
-	window := s.flow.RecvWindow()
-
 	cmd := &Command{
 		Type:     CmdAck,
 		StreamID: s.id,
-		AckSeq:   nextSeq,
-		SACKs:    sacks,
-		Window:   window,
+		AckSeq:   s.recvBuf.NextExpected(),
+		SACKs:    s.recvBuf.SACKBlocks(),
+		Window:   s.flow.RecvWindow(),
 	}
 	s.session.sendCommand(cmd)
 }
@@ -271,21 +273,20 @@ func (s *Stream) retransmit(seg *Segment) {
 	s.session.sendCommand(cmd)
 }
 
-// cleanup releases stream resources.
+// cleanup releases stream resources and unblocks pending Write calls.
 func (s *Stream) cleanup() {
 	select {
 	case <-s.done:
 	default:
 		close(s.done)
 	}
-	// Wake any goroutine blocked in WaitOutstandingBelow.
-	s.sendBuf.ackCond.Broadcast()
+	// Wake any Write blocked in WaitOutstandingBelow.
+	s.sendBuf.WakeAll()
 	s.session.removeStream(s.id)
 }
 
-// runRetransmitLoop periodically retransmits the oldest timed-out segment.
-// Limited to one retransmit per tick to prevent congestion collapse.
-// Also caps total sendBuf to prevent unbounded growth.
+// runRetransmitLoop retransmits the oldest timed-out segment periodically
+// and flushes pending delayed ACKs.
 func (s *Stream) runRetransmitLoop() {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -296,12 +297,16 @@ func (s *Stream) runRetransmitLoop() {
 		case <-ticker.C:
 			s.sendBuf.TrimAcked()
 
+			// Flush delayed ACK if any data received.
+			if s.unackedCount > 0 {
+				s.sendAck()
+				s.unackedCount = 0
+			}
+
 			rto := s.rtt.RTO()
 			seg := s.sendBuf.GetOldestRetransmittable(rto)
 			if seg != nil && seg.Retransmits < 5 {
 				s.retransmit(seg)
-				// Don't call OnTimeout here — it collapses cwnd on
-				// subsequent transfers. Rely on fast retransmit (3 dup ACKs).
 			}
 		}
 	}

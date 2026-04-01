@@ -10,26 +10,25 @@ const (
 )
 
 // FlowController manages per-stream flow control.
+// Flow control is advisory — Consume never rejects data.
+// The recv window is advertised in ACKs to pace the sender.
 type FlowController struct {
-	mu        sync.Mutex
-	recvWin   uint32 // our advertised receive window (how much peer can send)
-	consumed  uint32 // bytes consumed but not yet released
-	sendWin   uint32 // peer's advertised receive window (how much we can send)
-	sendCond  *sync.Cond
+	mu       sync.Mutex
+	recvWin  uint32 // our advertised receive window
+	consumed uint32 // bytes consumed but not yet released
+	sendWin  uint32 // peer's advertised receive window
 }
 
 // NewFlowController creates a flow controller with the given initial receive window.
 func NewFlowController(recvWindow uint32) *FlowController {
-	fc := &FlowController{
+	return &FlowController{
 		recvWin: recvWindow,
 		sendWin: DefaultRecvWindow,
 	}
-	fc.sendCond = sync.NewCond(&fc.mu)
-	return fc
 }
 
-// Consume decreases the receive window by n bytes (data received from peer).
-// Always accepts — flow control is advisory via ACK window, not a hard drop.
+// Consume decreases the receive window (data received from peer).
+// Always accepts — flow control is advisory, never drops data.
 func (fc *FlowController) Consume(n uint32) bool {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -42,8 +41,7 @@ func (fc *FlowController) Consume(n uint32) bool {
 	return true
 }
 
-// Release increases the receive window by n bytes (data read by application).
-// Returns the new window value to advertise to the peer.
+// Release increases the receive window (data read by application).
 func (fc *FlowController) Release(n uint32) uint32 {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -67,11 +65,9 @@ func (fc *FlowController) RecvWindow() uint32 {
 }
 
 // UpdateSendWindow sets the peer's advertised receive window.
-// Broadcasts to all goroutines waiting in WaitForSendWindow.
 func (fc *FlowController) UpdateSendWindow(window uint32) {
 	fc.mu.Lock()
 	fc.sendWin = window
-	fc.sendCond.Broadcast() // wake ALL waiting writers
 	fc.mu.Unlock()
 }
 
@@ -80,32 +76,4 @@ func (fc *FlowController) SendWindow() uint32 {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	return fc.sendWin
-}
-
-// WaitForSendWindow blocks until send window is > 0 or done is closed.
-// Returns false if done was closed.
-func (fc *FlowController) WaitForSendWindow(done <-chan struct{}) bool {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	// Check done channel in a non-blocking way periodically.
-	for fc.sendWin == 0 {
-		select {
-		case <-done:
-			return false
-		default:
-		}
-		// Use a goroutine to wake us if done closes.
-		ch := make(chan struct{})
-		go func() {
-			select {
-			case <-done:
-				fc.sendCond.Broadcast()
-			case <-ch:
-			}
-		}()
-		fc.sendCond.Wait()
-		close(ch)
-	}
-	return true
 }

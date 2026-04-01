@@ -38,7 +38,6 @@ func (e *RTTEstimator) Update(sample time.Duration) {
 		e.rttvar = sample / 2
 		e.hasSample = true
 	} else {
-		// SRTT = 7/8 * SRTT + 1/8 * sample
 		diff := e.srtt - sample
 		if diff < 0 {
 			diff = -diff
@@ -92,22 +91,25 @@ type Segment struct {
 }
 
 // SendBuffer manages outgoing unacknowledged segments.
+// Uses a sync.Cond to wake blocked writers when outstanding drops.
+// No goroutines are spawned — all waking is done via Broadcast from
+// AckTo/AckSACK which are called from the session's recvLoop.
 type SendBuffer struct {
 	mu          sync.Mutex
+	cond        *sync.Cond // broadcast when outstanding decreases
 	segments    []*Segment
 	nextSeq     uint32
-	outstanding uint32 // cached bytes in-flight
-	ackCond     *sync.Cond
+	outstanding uint32 // cached bytes in-flight (O(1) reads)
 }
 
-// NewSendBuffer creates an empty send buffer starting at seq 0.
+// NewSendBuffer creates an empty send buffer.
 func NewSendBuffer() *SendBuffer {
 	sb := &SendBuffer{}
-	sb.ackCond = sync.NewCond(&sb.mu)
+	sb.cond = sync.NewCond(&sb.mu)
 	return sb
 }
 
-// Append adds a new segment to the send buffer and returns the assigned seq.
+// Append adds a new segment and returns the assigned seq.
 func (sb *SendBuffer) Append(data []byte) uint32 {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -129,8 +131,8 @@ func (sb *SendBuffer) NextSeq() uint32 {
 	return sb.nextSeq
 }
 
-// AckTo marks all segments with seq < ackSeq as acknowledged
-// and removes them from the buffer. Returns total bytes acked.
+// AckTo marks all segments with seq < ackSeq as acknowledged,
+// removes them from the buffer, and wakes blocked writers.
 func (sb *SendBuffer) AckTo(ackSeq uint32) uint32 {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -155,13 +157,13 @@ func (sb *SendBuffer) AckTo(ackSeq uint32) uint32 {
 		sb.segments = sb.segments[cutoff:]
 	}
 	if ackedBytes > 0 {
-		sb.ackCond.Broadcast()
+		sb.cond.Broadcast()
 	}
 	return ackedBytes
 }
 
-// AckSACK marks segments within SACK ranges as acknowledged.
-// Returns total bytes acked by SACK blocks.
+// AckSACK marks segments within SACK ranges as acknowledged
+// and wakes blocked writers.
 func (sb *SendBuffer) AckSACK(sacks []SACKBlock) uint32 {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -179,13 +181,12 @@ func (sb *SendBuffer) AckSACK(sacks []SACKBlock) uint32 {
 		}
 	}
 	if ackedBytes > 0 {
-		sb.ackCond.Broadcast()
+		sb.cond.Broadcast()
 	}
 	return ackedBytes
 }
 
 // GetUnacked returns the first unacked segment for retransmission.
-// Returns nil if all segments are acked.
 func (sb *SendBuffer) GetUnacked() *Segment {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -197,8 +198,7 @@ func (sb *SendBuffer) GetUnacked() *Segment {
 	return nil
 }
 
-// GetRetransmittable returns segments that need retransmission
-// (unacked and either timed out or explicitly requested).
+// GetRetransmittable returns segments that need retransmission.
 func (sb *SendBuffer) GetRetransmittable(rto time.Duration) []*Segment {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -241,7 +241,14 @@ func (sb *SendBuffer) MarkRetransmitted(seq uint32) {
 	}
 }
 
-// TrimAcked removes fully acked segments from the head of the buffer.
+// Outstanding returns the total bytes in-flight. O(1).
+func (sb *SendBuffer) Outstanding() uint32 {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.outstanding
+}
+
+// TrimAcked removes fully acked segments from the head.
 func (sb *SendBuffer) TrimAcked() {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -258,52 +265,49 @@ func (sb *SendBuffer) TrimAcked() {
 	}
 }
 
-// Outstanding returns the total bytes in-flight (sent but unacked). O(1).
-func (sb *SendBuffer) Outstanding() uint32 {
+// WaitOutstandingBelow blocks until outstanding < limit or done is closed.
+// Does NOT spawn goroutines. Uses Cond.Wait which is woken by AckTo/AckSACK.
+// The done channel is checked between each wake-up.
+func (sb *SendBuffer) WaitOutstandingBelow(limit uint32, done <-chan struct{}) bool {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	return sb.outstanding
+
+	for sb.outstanding >= limit {
+		// Check done without blocking.
+		select {
+		case <-done:
+			return false
+		default:
+		}
+		sb.cond.Wait()
+	}
+	return true
 }
 
-// WaitOutstandingBelow blocks until outstanding drops below limit or done closes.
-func (sb *SendBuffer) WaitOutstandingBelow(limit uint32, done <-chan struct{}) bool {
+// WaitOutstandingBelowTimeout waits up to timeout for outstanding to drop.
+// Returns true if outstanding is below limit, false on timeout.
+// Does NOT spawn goroutines.
+func (sb *SendBuffer) WaitOutstandingBelowTimeout(limit uint32, timeout time.Duration) bool {
 	sb.mu.Lock()
 	if sb.outstanding < limit {
 		sb.mu.Unlock()
 		return true
 	}
-
-	// Start a ticker that periodically wakes the Cond as a safety net.
-	stop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(5 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-done:
-				sb.ackCond.Broadcast()
-				return
-			case <-ticker.C:
-				sb.ackCond.Broadcast()
-			}
-		}
-	}()
-
-	for sb.outstanding >= limit {
-		select {
-		case <-done:
-			sb.mu.Unlock()
-			close(stop)
-			return false
-		default:
-		}
-		sb.ackCond.Wait()
-	}
+	// Wait with a deadline. Start a timer that broadcasts once on expiry.
+	timer := time.AfterFunc(timeout, func() {
+		sb.cond.Broadcast()
+	})
+	sb.cond.Wait()
+	timer.Stop()
+	result := sb.outstanding < limit
 	sb.mu.Unlock()
-	close(stop)
-	return true
+	return result
+}
+
+// WakeAll wakes all goroutines blocked in WaitOutstandingBelow.
+// Called when the stream is closing to unblock any pending Write.
+func (sb *SendBuffer) WakeAll() {
+	sb.cond.Broadcast()
 }
 
 // RTTSample returns a valid RTT sample from the most recently acked segment,
@@ -322,7 +326,6 @@ func (sb *SendBuffer) RTTSample(ackSeq uint32) (time.Duration, bool) {
 
 // --- Receive buffer ---
 
-// recvSegment is an out-of-order received segment.
 type recvSegment struct {
 	seq  uint32
 	data []byte
@@ -331,9 +334,9 @@ type recvSegment struct {
 // RecvBuffer reorders incoming data segments.
 type RecvBuffer struct {
 	mu        sync.Mutex
-	nextSeq   uint32        // next expected sequence number
-	segments  []recvSegment // out-of-order segments, sorted by seq
-	ready     []byte        // contiguous data ready to read
+	nextSeq   uint32
+	segments  []recvSegment
+	ready     []byte
 	readyCond *sync.Cond
 	closed    bool
 }
@@ -346,7 +349,6 @@ func NewRecvBuffer() *RecvBuffer {
 }
 
 // Insert adds a received segment. Handles duplicates and out-of-order delivery.
-// Returns true if new data was accepted.
 func (rb *RecvBuffer) Insert(seq uint32, data []byte) bool {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
@@ -356,27 +358,21 @@ func (rb *RecvBuffer) Insert(seq uint32, data []byte) bool {
 	}
 
 	segEnd := seq + uint32(len(data))
-
-	// Already received.
 	if segEnd <= rb.nextSeq {
 		return false
 	}
-
-	// Trim overlap with already-received data.
 	if seq < rb.nextSeq {
 		trim := rb.nextSeq - seq
 		data = data[trim:]
 		seq = rb.nextSeq
 	}
 
-	// Check for duplicates in out-of-order buffer.
 	for _, s := range rb.segments {
 		if s.seq == seq {
 			return false
 		}
 	}
 
-	// Insert sorted by seq.
 	inserted := false
 	for i, s := range rb.segments {
 		if seq < s.seq {
@@ -391,14 +387,10 @@ func (rb *RecvBuffer) Insert(seq uint32, data []byte) bool {
 		rb.segments = append(rb.segments, recvSegment{seq: seq, data: append([]byte(nil), data...)})
 	}
 
-	// Drain contiguous segments.
 	rb.drainContiguous()
-
 	return true
 }
 
-// drainContiguous moves contiguous data from segments to the ready buffer.
-// Must be called with mu held.
 func (rb *RecvBuffer) drainContiguous() {
 	for len(rb.segments) > 0 && rb.segments[0].seq == rb.nextSeq {
 		seg := rb.segments[0]
@@ -409,7 +401,7 @@ func (rb *RecvBuffer) drainContiguous() {
 	}
 }
 
-// Read reads contiguous data from the buffer. Blocks if no data is available.
+// Read reads contiguous data. Blocks if no data is available.
 func (rb *RecvBuffer) Read(p []byte) (int, error) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
@@ -426,21 +418,21 @@ func (rb *RecvBuffer) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// ReadyLen returns the number of contiguous bytes available to read.
+// ReadyLen returns the number of contiguous bytes available.
 func (rb *RecvBuffer) ReadyLen() int {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 	return len(rb.ready)
 }
 
-// NextExpected returns the next expected sequence number (cumulative ACK value).
+// NextExpected returns the next expected seq (cumulative ACK value).
 func (rb *RecvBuffer) NextExpected() uint32 {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 	return rb.nextSeq
 }
 
-// SACKBlocks returns the SACK blocks for out-of-order data.
+// SACKBlocks returns SACK blocks for out-of-order data.
 func (rb *RecvBuffer) SACKBlocks() []SACKBlock {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
@@ -467,7 +459,7 @@ func (rb *RecvBuffer) SACKBlocks() []SACKBlock {
 	return blocks
 }
 
-// Close marks the buffer as closed, waking any blocked readers.
+// Close marks the buffer as closed.
 func (rb *RecvBuffer) Close() {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
