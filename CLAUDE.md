@@ -61,7 +61,8 @@ The client auto-loads `client.json` if it exists next to the executable — no f
 ## Performance
 
 Measured on a real VDS (Russia -> Netherlands):
-- Peak throughput: **27 Mbit/s** (3.38 MB/s, single 6.8 MB file in 2s)
+- Peak throughput: **30 Mbit/s** (3.75 MB/s)
+- Stability: 5 consecutive 6.8 MB downloads, all in ~2s, zero degradation
 - Speedtest.net: 2.16 / 1.17 Mbit/s (Ookla, limited by test methodology)
 - 67 parallel streams: all complete, 0 pending
 - Overhead: ~100-150 bytes/packet (morph header + AEAD tag + padding)
@@ -84,8 +85,11 @@ Key parameters in `mux/`:
 - **Flow control**: advisory only — Consume never rejects, recv window advertised via ACK
 - **WaitForSendWindow**: uses `sync.Cond` broadcast (wakes ALL blocked streams, not just one)
 - **SendBuffer.Outstanding**: O(1) cached counter, TrimAcked keeps buffer bounded
+- **Delayed ACK**: ACK sent every 32 packets (not every packet), 200ms flush timer as safety net
 
 The key insight: UDP has no built-in congestion control, so sending thousands of packets in a burst causes massive loss. The 256KB outstanding limit acts as a send-side flow control that naturally paces packets without requiring ACK-driven throttling for each chunk.
+
+**Critical design rule**: Never spawn goroutines in hot-path functions (WaitOutstandingBelow, WaitForSendWindow). Previous goroutine-per-call design caused CPU exhaustion after large transfers. Use sync.Cond with time.AfterFunc for timeouts instead.
 
 ## Important invariants
 
