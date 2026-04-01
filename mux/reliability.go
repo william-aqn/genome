@@ -204,6 +204,21 @@ func (sb *SendBuffer) GetRetransmittable(rto time.Duration) []*Segment {
 	return result
 }
 
+// GetOldestRetransmittable returns the single oldest unacked segment
+// that has exceeded the RTO, or nil.
+func (sb *SendBuffer) GetOldestRetransmittable(rto time.Duration) *Segment {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	now := time.Now()
+	for _, seg := range sb.segments {
+		if !seg.Acked && now.Sub(seg.SentAt) >= rto && seg.Retransmits < maxRetransmits {
+			return seg
+		}
+	}
+	return nil
+}
+
 // MarkRetransmitted updates the sent time and retransmit count.
 func (sb *SendBuffer) MarkRetransmitted(seq uint32) {
 	sb.mu.Lock()
@@ -214,6 +229,23 @@ func (sb *SendBuffer) MarkRetransmitted(seq uint32) {
 			seg.Retransmits++
 			return
 		}
+	}
+}
+
+// TrimAcked removes fully acked segments from the head of the buffer.
+func (sb *SendBuffer) TrimAcked() {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	cutoff := 0
+	for i, seg := range sb.segments {
+		if seg.Acked {
+			cutoff = i + 1
+		} else {
+			break
+		}
+	}
+	if cutoff > 0 {
+		sb.segments = sb.segments[cutoff:]
 	}
 }
 

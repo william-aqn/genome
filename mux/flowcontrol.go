@@ -4,9 +4,9 @@ import "sync"
 
 const (
 	// DefaultRecvWindow is the default receive window size in bytes.
-	DefaultRecvWindow = 512 * 1024 // 512 KB
+	DefaultRecvWindow = 4 * 1024 * 1024 // 4 MB
 	// MaxRecvWindow is the maximum receive window size.
-	MaxRecvWindow = 16 * 1024 * 1024 // 16 MB
+	MaxRecvWindow = 64 * 1024 * 1024 // 64 MB
 )
 
 // FlowController manages per-stream flow control.
@@ -29,14 +29,15 @@ func NewFlowController(recvWindow uint32) *FlowController {
 }
 
 // Consume decreases the receive window by n bytes (data received from peer).
-// Returns false if the window would go negative (peer violated flow control).
+// Always accepts — flow control is advisory via ACK window, not a hard drop.
 func (fc *FlowController) Consume(n uint32) bool {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if n > fc.recvWin {
-		return false
+		fc.recvWin = 0
+	} else {
+		fc.recvWin -= n
 	}
-	fc.recvWin -= n
 	fc.consumed += n
 	return true
 }

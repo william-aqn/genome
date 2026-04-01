@@ -233,12 +233,16 @@ func TestFlowControl(t *testing.T) {
 		t.Fatalf("recv window = %d, want 400", fc.RecvWindow())
 	}
 
-	if fc.Consume(500) {
-		t.Fatal("consume 500 should fail (only 400 available)")
+	// Consume beyond window should still succeed (advisory flow control).
+	if !fc.Consume(500) {
+		t.Fatal("consume 500 should succeed (advisory)")
+	}
+	if fc.RecvWindow() != 0 {
+		t.Fatalf("recv window = %d, want 0", fc.RecvWindow())
 	}
 
-	win := fc.Release(600)
-	if win != 1000 {
+	win := fc.Release(1100)
+	if win != 1100 {
 		t.Fatalf("after release, window = %d, want 1000", win)
 	}
 }

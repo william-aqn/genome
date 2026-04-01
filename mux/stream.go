@@ -105,20 +105,18 @@ func (s *Stream) Write(p []byte) (int, error) {
 		default:
 		}
 
-		// Per-stream flow control: respect peer's receive window.
-		sendWin := s.flow.SendWindow()
-		if sendWin == 0 {
-			// Wait for peer to open window, with timeout.
-			if !s.flow.WaitForSendWindow(s.done) {
+		// Limit in-flight data to prevent UDP burst drops.
+		// Allow up to 256 KB outstanding per stream before throttling.
+		const maxOutstanding = 256 * 1024
+		for s.sendBuf.Outstanding() > maxOutstanding {
+			select {
+			case <-s.done:
 				return written, errStreamClosed
+			case <-time.After(10 * time.Millisecond):
 			}
-			continue
 		}
 
 		chunk := p[written:]
-		if uint32(len(chunk)) > sendWin {
-			chunk = chunk[:sendWin]
-		}
 		if len(chunk) > MSS {
 			chunk = chunk[:MSS]
 		}
@@ -186,10 +184,11 @@ func (s *Stream) handleData(cmd *Command) {
 		return
 	}
 
+	// Always accept data — don't drop on flow control violation.
+	// Flow control is advisory via ACK window; dropping causes hangs
+	// on large transfers when recv window depletes before Read drains.
 	dataLen := uint32(len(cmd.Data))
-	if !s.flow.Consume(dataLen) {
-		return
-	}
+	s.flow.Consume(dataLen) // best-effort tracking
 
 	s.recvBuf.Insert(cmd.Seq, cmd.Data)
 	s.sendAck()
@@ -286,20 +285,24 @@ func (s *Stream) cleanup() {
 	s.session.removeStream(s.id)
 }
 
-// runRetransmitLoop periodically checks for segments needing retransmission.
+// runRetransmitLoop periodically retransmits the oldest timed-out segment.
+// Limited to one retransmit per tick to prevent congestion collapse.
+// Also caps total sendBuf to prevent unbounded growth.
 func (s *Stream) runRetransmitLoop() {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-s.done:
 			return
 		case <-ticker.C:
+			// Trim acked segments from head to keep buffer bounded.
+			s.sendBuf.TrimAcked()
+
 			rto := s.rtt.RTO()
-			segs := s.sendBuf.GetRetransmittable(rto)
-			for _, seg := range segs {
+			seg := s.sendBuf.GetOldestRetransmittable(rto)
+			if seg != nil && seg.Retransmits < 5 {
 				s.retransmit(seg)
-				s.session.congestion.OnTimeout()
 				s.rtt.BackoffRTO()
 			}
 		}
