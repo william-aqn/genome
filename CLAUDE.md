@@ -65,13 +65,34 @@ Measured on a real VDS (Russia -> Europe):
 - Upload: ~1.17 Mbit/s
 - Overhead: ~100-150 bytes/packet (morph header + AEAD tag + padding)
 
+Playwright test results (12/12 pass):
+- Simple sites (example.com, httpbin.org): 150-500ms
+- Wikipedia with full CSS/JS/images: ~400ms
+- Parallel 3 sites simultaneously: ~800ms
+- Heavy sites (github.com): slow but don't block other streams
+
+## Mux tuning (congestion / flow control)
+
+Key parameters in `mux/`:
+- **Initial CWND**: 256 KB (`congestion.go`) — high to avoid starving parallel streams in slow start
+- **Min CWND**: 32 KB — prevents collapse on loss
+- **Max CWND**: 16 MB — allows full utilization on fast links
+- **Default recv window**: 512 KB per stream (`flowcontrol.go`)
+- **Retransmit check interval**: 100ms (`stream.go`)
+- **Flow control**: per-stream only, no global congestion blocking on Write path. Congestion control (NewReno) adjusts sending rate via ACK feedback but doesn't block individual stream writes.
+- **WaitForSendWindow**: uses `sync.Cond` broadcast (wakes ALL blocked streams, not just one)
+- **SendBuffer.Outstanding**: O(1) cached counter
+
+If heavy sites still hang, check: congestion window collapse (too many OnTimeout calls), recv window exhaustion (slow Read draining), or UDP packet loss on the link.
+
 ## Important invariants
 
 - Same PSK + same code version = identical genome on any platform. If you change `internal/randutil` or `morph/genome.go`, verify cross-platform determinism.
 - `morph.Encoder.Encode` output must be indistinguishable from random. The entropy test in `morph/morph_test.go` (`TestFrameEntropy`) must pass >= 7.9 bits/byte.
-- Anti-replay window in `transport/tunnel.go` rejects epoch 0 and epochs outside the sliding window.
+- Anti-replay window in `transport/tunnel.go` rejects epoch 0 and epochs outside the sliding window. Resets when peer address changes (client reconnect).
 - `mux.Session.recvLoop` runs independently of any stream's Write path — this prevents deadlocks where both sides block on flow control.
 - All per-stream goroutines (retransmit loop) are tied to `stream.done` channel and stop on Close.
+- Stream.Write uses per-stream flow control only. Global congestion control is advisory (affects ACK-driven rate, not blocking).
 
 ## Sensitive data policy
 
