@@ -60,16 +60,17 @@ The client auto-loads `client.json` if it exists next to the executable — no f
 
 ## Performance
 
-Measured on a real VDS (Russia -> Europe):
-- Download: ~2.16 Mbit/s
-- Upload: ~1.17 Mbit/s
+Measured on a real VDS (Russia -> Netherlands):
+- Peak throughput: **27 Mbit/s** (3.38 MB/s, single 6.8 MB file in 2s)
+- Speedtest.net: 2.16 / 1.17 Mbit/s (Ookla, limited by test methodology)
+- 67 parallel streams: all complete, 0 pending
 - Overhead: ~100-150 bytes/packet (morph header + AEAD tag + padding)
 
 Playwright test results (12/12 pass):
 - Simple sites (example.com, httpbin.org): 150-500ms
 - Wikipedia with full CSS/JS/images: ~400ms
 - Parallel 3 sites simultaneously: ~800ms
-- Heavy sites (github.com): slow but don't block other streams
+- speedtest.net: fully loads (67/67 resources)
 
 ## Mux tuning (congestion / flow control)
 
@@ -77,13 +78,14 @@ Key parameters in `mux/`:
 - **Initial CWND**: 256 KB (`congestion.go`) — high to avoid starving parallel streams in slow start
 - **Min CWND**: 32 KB — prevents collapse on loss
 - **Max CWND**: 16 MB — allows full utilization on fast links
-- **Default recv window**: 512 KB per stream (`flowcontrol.go`)
-- **Retransmit check interval**: 100ms (`stream.go`)
-- **Flow control**: per-stream only, no global congestion blocking on Write path. Congestion control (NewReno) adjusts sending rate via ACK feedback but doesn't block individual stream writes.
+- **Default recv window**: 4 MB per stream (`flowcontrol.go`) — advisory, never drops data
+- **Max outstanding per stream**: 256 KB (`stream.go`) — Write throttles beyond this to prevent UDP burst drops
+- **Retransmit**: oldest unacked segment only, 200ms check interval, max 5 retries per segment
+- **Flow control**: advisory only — Consume never rejects, recv window advertised via ACK
 - **WaitForSendWindow**: uses `sync.Cond` broadcast (wakes ALL blocked streams, not just one)
-- **SendBuffer.Outstanding**: O(1) cached counter
+- **SendBuffer.Outstanding**: O(1) cached counter, TrimAcked keeps buffer bounded
 
-If heavy sites still hang, check: congestion window collapse (too many OnTimeout calls), recv window exhaustion (slow Read draining), or UDP packet loss on the link.
+The key insight: UDP has no built-in congestion control, so sending thousands of packets in a burst causes massive loss. The 256KB outstanding limit acts as a send-side flow control that naturally paces packets without requiring ACK-driven throttling for each chunk.
 
 ## Important invariants
 
