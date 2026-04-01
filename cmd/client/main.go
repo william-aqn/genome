@@ -38,6 +38,7 @@ func main() {
 		cipher     = flag.String("cipher", "chacha20", "cipher suite: chacha20 or aes256gcm")
 		logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")
 		noUI       = flag.Bool("no-ui", false, "disable dashboard, plain log output")
+		noAuth     = flag.Bool("no-auth", false, "disable SOCKS5 authentication")
 	)
 	flag.Parse()
 
@@ -82,9 +83,15 @@ func main() {
 	}
 	cfg.Defaults()
 
+	// Disable auth if requested.
+	if *noAuth {
+		cfg.SOCKSUser = ""
+		cfg.SOCKSPass = ""
+	}
+
 	// Generate random SOCKS credentials/port only for fresh configs (not loaded from file).
 	fromFile := *cfgPath != ""
-	if !fromFile {
+	if !fromFile && !*noAuth {
 		if cfg.SOCKSUser == "" {
 			cfg.SOCKSUser = randomString(8)
 		}
