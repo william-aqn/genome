@@ -97,11 +97,14 @@ type SendBuffer struct {
 	segments    []*Segment
 	nextSeq     uint32
 	outstanding uint32 // cached bytes in-flight
+	ackCond     *sync.Cond
 }
 
 // NewSendBuffer creates an empty send buffer starting at seq 0.
 func NewSendBuffer() *SendBuffer {
-	return &SendBuffer{}
+	sb := &SendBuffer{}
+	sb.ackCond = sync.NewCond(&sb.mu)
+	return sb
 }
 
 // Append adds a new segment to the send buffer and returns the assigned seq.
@@ -150,6 +153,9 @@ func (sb *SendBuffer) AckTo(ackSeq uint32) uint32 {
 	}
 	if cutoff > 0 {
 		sb.segments = sb.segments[cutoff:]
+	}
+	if ackedBytes > 0 {
+		sb.ackCond.Broadcast()
 	}
 	return ackedBytes
 }
@@ -254,6 +260,32 @@ func (sb *SendBuffer) Outstanding() uint32 {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 	return sb.outstanding
+}
+
+// WaitOutstandingBelow blocks until outstanding drops below limit or done closes.
+func (sb *SendBuffer) WaitOutstandingBelow(limit uint32, done <-chan struct{}) bool {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	for sb.outstanding >= limit {
+		// Check done without blocking.
+		select {
+		case <-done:
+			return false
+		default:
+		}
+		// Wake on ACK or done.
+		ch := make(chan struct{})
+		go func() {
+			select {
+			case <-done:
+				sb.ackCond.Broadcast()
+			case <-ch:
+			}
+		}()
+		sb.ackCond.Wait()
+		close(ch)
+	}
+	return true
 }
 
 // RTTSample returns a valid RTT sample from the most recently acked segment,

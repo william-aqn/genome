@@ -106,14 +106,9 @@ func (s *Stream) Write(p []byte) (int, error) {
 		}
 
 		// Limit in-flight data to prevent UDP burst drops.
-		// Allow up to 256 KB outstanding per stream before throttling.
-		const maxOutstanding = 256 * 1024
-		for s.sendBuf.Outstanding() > maxOutstanding {
-			select {
-			case <-s.done:
-				return written, errStreamClosed
-			case <-time.After(10 * time.Millisecond):
-			}
+		const maxOutstanding uint32 = 256 * 1024
+		if !s.sendBuf.WaitOutstandingBelow(maxOutstanding, s.done) {
+			return written, errStreamClosed
 		}
 
 		chunk := p[written:]
