@@ -80,11 +80,15 @@ func (s *Stream) Read(p []byte) (int, error) {
 	if st == stateClosed {
 		return 0, errStreamClosed
 	}
-	return s.recvBuf.Read(p)
+	n, err := s.recvBuf.Read(p)
+	if n > 0 {
+		s.flow.Release(uint32(n))
+	}
+	return n, err
 }
 
-// Write sends data on the stream. It segments the data into MSS-sized chunks,
-// respecting flow control and congestion windows.
+// Write sends data on the stream. Segments into MSS-sized chunks.
+// Uses per-stream flow control only; congestion control is advisory.
 func (s *Stream) Write(p []byte) (int, error) {
 	s.stateMu.RLock()
 	st := s.state
@@ -95,37 +99,30 @@ func (s *Stream) Write(p []byte) (int, error) {
 
 	written := 0
 	for written < len(p) {
-		// Determine how much we can send.
-		sendWin := s.flow.SendWindow()
-		congWin := s.session.congestion.SendWindow()
-		outstanding := s.sendBuf.Outstanding()
-
-		effectiveWin := min32(sendWin, congWin)
-		if effectiveWin <= outstanding {
-			// Wait for window to open.
-			select {
-			case <-s.flow.WaitSendReady():
-				continue
-			case <-s.done:
-				return written, errStreamClosed
-			case <-time.After(s.rtt.RTO()):
-				continue // retry after timeout
-			}
+		select {
+		case <-s.done:
+			return written, errStreamClosed
+		default:
 		}
 
-		available := effectiveWin - outstanding
+		// Per-stream flow control: respect peer's receive window.
+		sendWin := s.flow.SendWindow()
+		if sendWin == 0 {
+			// Wait for peer to open window, with timeout.
+			if !s.flow.WaitForSendWindow(s.done) {
+				return written, errStreamClosed
+			}
+			continue
+		}
+
 		chunk := p[written:]
-		if uint32(len(chunk)) > available {
-			chunk = chunk[:available]
+		if uint32(len(chunk)) > sendWin {
+			chunk = chunk[:sendWin]
 		}
 		if len(chunk) > MSS {
 			chunk = chunk[:MSS]
 		}
-		if len(chunk) == 0 {
-			continue
-		}
 
-		// Copy data so caller can reuse buffer.
 		data := make([]byte, len(chunk))
 		copy(data, chunk)
 
@@ -164,7 +161,6 @@ func (s *Stream) Close() error {
 		}
 		s.stateMu.Unlock()
 
-		// Send CLOSE command.
 		cmd := &Command{
 			Type:     CmdClose,
 			StreamID: s.id,
@@ -192,13 +188,10 @@ func (s *Stream) handleData(cmd *Command) {
 
 	dataLen := uint32(len(cmd.Data))
 	if !s.flow.Consume(dataLen) {
-		// Peer violated flow control; ignore.
 		return
 	}
 
 	s.recvBuf.Insert(cmd.Seq, cmd.Data)
-
-	// Send ACK.
 	s.sendAck()
 }
 
@@ -207,13 +200,11 @@ func (s *Stream) handleAck(cmd *Command) {
 	// RTT sample (Karn's algorithm: only from non-retransmitted segments).
 	if sample, ok := s.sendBuf.RTTSample(cmd.AckSeq); ok {
 		s.rtt.Update(sample)
-		s.session.congestion.OnAck(0, sample) // update RTT
+		s.session.congestion.OnAck(0, sample)
 	}
 
-	// Cumulative ACK.
 	ackedBytes := s.sendBuf.AckTo(cmd.AckSeq)
 
-	// SACK processing.
 	if len(cmd.SACKs) > 0 {
 		ackedBytes += s.sendBuf.AckSACK(cmd.SACKs)
 	}
@@ -223,10 +214,8 @@ func (s *Stream) handleAck(cmd *Command) {
 		s.dupAckCount = 0
 		s.lastAckSeq = cmd.AckSeq
 	} else if cmd.AckSeq == s.lastAckSeq {
-		// Duplicate ACK.
 		s.dupAckCount++
 		if s.dupAckCount == 3 {
-			// Fast retransmit.
 			s.session.congestion.OnLoss()
 			if seg := s.sendBuf.GetUnacked(); seg != nil {
 				s.retransmit(seg)
@@ -234,7 +223,6 @@ func (s *Stream) handleAck(cmd *Command) {
 		}
 	}
 
-	// Update send window from peer's advertised window.
 	s.flow.UpdateSendWindow(cmd.Window)
 }
 
@@ -300,7 +288,7 @@ func (s *Stream) cleanup() {
 
 // runRetransmitLoop periodically checks for segments needing retransmission.
 func (s *Stream) runRetransmitLoop() {
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -316,11 +304,6 @@ func (s *Stream) runRetransmitLoop() {
 			}
 		}
 	}
-}
-
-// releaseRecvWindow is called by Read consumers to release flow control credits.
-func (s *Stream) releaseRecvWindow(n uint32) {
-	s.flow.Release(n)
 }
 
 func min32(a, b uint32) uint32 {

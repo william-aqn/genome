@@ -7,11 +7,12 @@ import (
 
 const (
 	// initialCWND is the initial congestion window (in bytes).
-	initialCWND = 32 * 1024 // 32 KB
+	// Set high to avoid starving parallel streams during slow start.
+	initialCWND = 256 * 1024 // 256 KB
 	// minCWND prevents cwnd from dropping to zero.
-	minCWND = 4 * 1024 // 4 KB
+	minCWND = 32 * 1024 // 32 KB
 	// maxCWND caps the congestion window.
-	maxCWND = 4 * 1024 * 1024 // 4 MB
+	maxCWND = 16 * 1024 * 1024 // 16 MB
 	// MSS is the maximum segment size used by the congestion controller.
 	MSS = 1200
 )

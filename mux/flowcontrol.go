@@ -4,9 +4,9 @@ import "sync"
 
 const (
 	// DefaultRecvWindow is the default receive window size in bytes.
-	DefaultRecvWindow = 256 * 1024 // 256 KB
+	DefaultRecvWindow = 512 * 1024 // 512 KB
 	// MaxRecvWindow is the maximum receive window size.
-	MaxRecvWindow = 4 * 1024 * 1024 // 4 MB
+	MaxRecvWindow = 16 * 1024 * 1024 // 16 MB
 )
 
 // FlowController manages per-stream flow control.
@@ -15,16 +15,17 @@ type FlowController struct {
 	recvWin   uint32 // our advertised receive window (how much peer can send)
 	consumed  uint32 // bytes consumed but not yet released
 	sendWin   uint32 // peer's advertised receive window (how much we can send)
-	sendReady chan struct{}
+	sendCond  *sync.Cond
 }
 
 // NewFlowController creates a flow controller with the given initial receive window.
 func NewFlowController(recvWindow uint32) *FlowController {
-	return &FlowController{
-		recvWin:   recvWindow,
-		sendWin:   DefaultRecvWindow, // assume peer starts with default
-		sendReady: make(chan struct{}, 1),
+	fc := &FlowController{
+		recvWin: recvWindow,
+		sendWin: DefaultRecvWindow,
 	}
+	fc.sendCond = sync.NewCond(&fc.mu)
+	return fc
 }
 
 // Consume decreases the receive window by n bytes (data received from peer).
@@ -65,15 +66,12 @@ func (fc *FlowController) RecvWindow() uint32 {
 }
 
 // UpdateSendWindow sets the peer's advertised receive window.
+// Broadcasts to all goroutines waiting in WaitForSendWindow.
 func (fc *FlowController) UpdateSendWindow(window uint32) {
 	fc.mu.Lock()
 	fc.sendWin = window
+	fc.sendCond.Broadcast() // wake ALL waiting writers
 	fc.mu.Unlock()
-	// Signal that send window may have opened.
-	select {
-	case fc.sendReady <- struct{}{}:
-	default:
-	}
 }
 
 // SendWindow returns how many bytes we are allowed to send.
@@ -83,7 +81,30 @@ func (fc *FlowController) SendWindow() uint32 {
 	return fc.sendWin
 }
 
-// WaitSendReady returns a channel that signals when send window may have changed.
-func (fc *FlowController) WaitSendReady() <-chan struct{} {
-	return fc.sendReady
+// WaitForSendWindow blocks until send window is > 0 or done is closed.
+// Returns false if done was closed.
+func (fc *FlowController) WaitForSendWindow(done <-chan struct{}) bool {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	// Check done channel in a non-blocking way periodically.
+	for fc.sendWin == 0 {
+		select {
+		case <-done:
+			return false
+		default:
+		}
+		// Use a goroutine to wake us if done closes.
+		ch := make(chan struct{})
+		go func() {
+			select {
+			case <-done:
+				fc.sendCond.Broadcast()
+			case <-ch:
+			}
+		}()
+		fc.sendCond.Wait()
+		close(ch)
+	}
+	return true
 }

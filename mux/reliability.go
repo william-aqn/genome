@@ -93,9 +93,10 @@ type Segment struct {
 
 // SendBuffer manages outgoing unacknowledged segments.
 type SendBuffer struct {
-	mu       sync.Mutex
-	segments []*Segment
-	nextSeq  uint32
+	mu          sync.Mutex
+	segments    []*Segment
+	nextSeq     uint32
+	outstanding uint32 // cached bytes in-flight
 }
 
 // NewSendBuffer creates an empty send buffer starting at seq 0.
@@ -114,6 +115,7 @@ func (sb *SendBuffer) Append(data []byte) uint32 {
 		SentAt: time.Now(),
 	})
 	sb.nextSeq = seq + uint32(len(data))
+	sb.outstanding += uint32(len(data))
 	return seq
 }
 
@@ -136,7 +138,9 @@ func (sb *SendBuffer) AckTo(ackSeq uint32) uint32 {
 		segEnd := seg.Seq + uint32(len(seg.Data))
 		if segEnd <= ackSeq {
 			if !seg.Acked {
-				ackedBytes += uint32(len(seg.Data))
+				n := uint32(len(seg.Data))
+				ackedBytes += n
+				sb.outstanding -= n
 				seg.Acked = true
 			}
 			cutoff = i + 1
@@ -162,7 +166,9 @@ func (sb *SendBuffer) AckSACK(sacks []SACKBlock) uint32 {
 			segEnd := seg.Seq + uint32(len(seg.Data))
 			if seg.Seq >= blk.Left && segEnd <= blk.Right && !seg.Acked {
 				seg.Acked = true
-				ackedBytes += uint32(len(seg.Data))
+				n := uint32(len(seg.Data))
+				ackedBytes += n
+				sb.outstanding -= n
 			}
 		}
 	}
@@ -211,17 +217,11 @@ func (sb *SendBuffer) MarkRetransmitted(seq uint32) {
 	}
 }
 
-// Outstanding returns the total bytes in-flight (sent but unacked).
+// Outstanding returns the total bytes in-flight (sent but unacked). O(1).
 func (sb *SendBuffer) Outstanding() uint32 {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	var total uint32
-	for _, seg := range sb.segments {
-		if !seg.Acked {
-			total += uint32(len(seg.Data))
-		}
-	}
-	return total
+	return sb.outstanding
 }
 
 // RTTSample returns a valid RTT sample from the most recently acked segment,
