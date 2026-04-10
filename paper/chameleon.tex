@@ -21,12 +21,17 @@
 \usepackage{bytefield}
 \usepackage{multirow}
 
-% --- Hyperref setup ---
+% --- Hyperref setup (PDF metadata) ---
 \hypersetup{
   colorlinks=true,
   linkcolor=blue!70!black,
   citecolor=green!50!black,
   urlcolor=blue!70!black,
+  pdftitle={Chameleon: A Polymorphic UDP Tunneling Protocol with Session-Unique Wire Formats},
+  pdfauthor={william-aqn},
+  pdfsubject={Polymorphic UDP tunneling protocol with per-session wire format derivation from PSK via HKDF-SHA256},
+  pdfkeywords={UDP tunneling, protocol polymorphism, traffic obfuscation, deep packet inspection, AEAD encryption, network security},
+  pdfcreator={LaTeX with hyperref},
 }
 
 % --- Listings setup ---
@@ -58,6 +63,19 @@
 
 \begin{document}
 \maketitle
+
+\vspace{-1em}
+\noindent\rule{\textwidth}{0.4pt}
+\smallskip
+\noindent
+\textbf{DOI:} \href{https://doi.org/10.5281/zenodo.19493212}{10.5281/zenodo.19493212} \hfill
+\textbf{License:} \href{https://creativecommons.org/licenses/by/4.0/}{CC BY 4.0}\\
+\noindent
+\textbf{Source code:} \url{https://github.com/william-aqn/genome} \hfill
+\textbf{Software license:} \href{https://www.gnu.org/licenses/gpl-3.0.html}{GPL-3.0}
+\smallskip
+\noindent\rule{\textwidth}{0.4pt}
+\medskip
 
 % ============================================================
 \begin{abstract}
@@ -566,6 +584,8 @@ We have presented \chameleon{}, a polymorphic UDP tunneling protocol that derive
 The protocol achieves 7.9 bits/byte Shannon entropy on the wire, provides authenticated encryption with epoch-based nonce construction, and resists replay attacks through a 256-epoch sliding window. A stream multiplexer with SACK, NewReno congestion control, and per-stream flow control delivers reliable, ordered data over UDP at 30~Mbit/s with 67 concurrent streams.
 
 \chameleon{} demonstrates that per-session wire-format polymorphism is a viable and efficient approach to circumventing deep packet inspection, offering stronger fingerprint resistance than fixed-format randomization while maintaining practical throughput for real-world use.
+
+The implementation is released under the GNU General Public License v3.0 (GPL-3.0) and is available at \url{https://github.com/william-aqn/genome}. This paper is licensed under the Creative Commons Attribution 4.0 International License (CC~BY~4.0).
 
 % ============================================================
 \bibliographystyle{plain}
