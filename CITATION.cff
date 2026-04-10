@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+title: "Chameleon (genome): Polymorphic UDP Tunneling Protocol"
+message: "If you use this software, please cite it using these metadata."
+type: software
+authors:
+  - name: "william-aqn"
+    orcid: "https://orcid.org/0009-0005-4749-1606"
+repository-code: "https://github.com/william-aqn/genome"
+url: "https://github.com/william-aqn/genome"
+abstract: >-
+  Chameleon is a polymorphic UDP tunneling protocol in Go. Each session
+  deterministically derives a unique wire format (genome) from a pre-shared
+  key via HKDF-SHA256. Traffic appears as pure noise with ~7.9 bits/byte
+  Shannon entropy. Applications connect through a local SOCKS5 proxy;
+  streams are multiplexed over one encrypted UDP tunnel with SACK-based
+  reliable delivery and NewReno congestion control.
+keywords:
+  - UDP tunneling
+  - protocol polymorphism
+  - traffic obfuscation
+  - SOCKS5 proxy
+  - AEAD encryption
+  - deep packet inspection evasion
+  - network security
+  - Go
+license: GPL-3.0-only
+version: "0.1.3"
+date-released: "2026-04-01"

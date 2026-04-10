@@ -1,0 +1,44 @@
+{
+  "title": "Chameleon (genome): Polymorphic UDP Tunneling Protocol",
+  "upload_type": "software",
+  "description": "<p>Chameleon is a polymorphic UDP tunneling protocol implemented in Go. Each session deterministically derives a unique wire format (&ldquo;genome&rdquo;) from a pre-shared key (PSK) via HKDF-SHA256. The resulting traffic appears as pure noise with approximately 7.9 bits/byte Shannon entropy &mdash; no magic bytes, fixed headers, or recognizable handshake patterns exist on the wire.</p><p>Applications connect through a local SOCKS5 proxy (RFC 1928/1929). Multiple TCP streams are multiplexed over a single encrypted UDP tunnel using a custom reliable transport with selective acknowledgment (SACK), NewReno congestion control, and per-stream flow control.</p><p><strong>Key properties:</strong></p><ul><li>Session-unique wire format: field order (Fisher-Yates shuffle), 0&ndash;3 decoy fields, variable nonce size (12/24 bytes), four length encoding schemes, randomized padding</li><li>AEAD encryption: ChaCha20-Poly1305, XChaCha20-Poly1305, or AES-256-GCM</li><li>Anti-replay protection: sliding window with random initial epoch</li><li>Reliable delivery over UDP: per-stream sequence numbers, SACK, fast retransmit, RTT estimation (Jacobson/Karels)</li><li>Zero recognizable signatures for deep packet inspection (DPI)</li></ul>",
+  "creators": [
+    {
+      "name": "william-aqn",
+      "orcid": "0009-0005-4749-1606"
+    }
+  ],
+  "keywords": [
+    "UDP tunneling",
+    "protocol polymorphism",
+    "traffic obfuscation",
+    "SOCKS5 proxy",
+    "AEAD encryption",
+    "deep packet inspection evasion",
+    "stream multiplexing",
+    "Go",
+    "network security",
+    "censorship circumvention",
+    "cryptographic protocols"
+  ],
+  "license": {
+    "id": "GPL-3.0-only"
+  },
+  "access_right": "open",
+  "language": "eng",
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/william-aqn/genome",
+      "relation": "isSupplementTo",
+      "scheme": "url",
+      "resource_type": "software"
+    }
+  ],
+  "notes": "Chameleon derives a per-session wire format ('genome') from a PSK using HKDF, making each session structurally unique. This approach to protocol polymorphism may be of interest to network security researchers studying DPI evasion and traffic analysis resistance.",
+  "references": [
+    "RFC 1928 - SOCKS Protocol Version 5",
+    "RFC 1929 - Username/Password Authentication for SOCKS V5",
+    "RFC 5869 - HMAC-based Extract-and-Expand Key Derivation Function (HKDF)",
+    "RFC 8439 - ChaCha20 and Poly1305 for IETF Protocols"
+  ]
+}
