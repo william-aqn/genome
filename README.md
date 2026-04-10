@@ -1,80 +1,82 @@
 # Chameleon (genome)
 
-Полиморфный протокол туннелирования трафика через UDP. Каждая сессия имеет уникальный wire format, детерминистически выведенный из общего секрета (PSK). Наблюдатель без PSK видит только случайные байты — никаких magic bytes, фиксированных заголовков или узнаваемых handshake.
+Polymorphic UDP tunneling protocol. Each session derives a unique wire format ("genome") deterministically from a pre-shared key (PSK). Without the PSK, an observer sees only random bytes — no magic bytes, fixed headers, or recognizable handshakes.
 
-## Принцип работы
+[README на русском](README.RU.md)
+
+## How It Works
 
 ```
-Браузер / curl / любое приложение
+Browser / curl / any application
         |  TCP
         v
-  SOCKS5 (127.0.0.1:1080)        <-- клиент, принимает SOCKS5 CONNECT
+  SOCKS5 (127.0.0.1:1080)        <-- client, accepts SOCKS5 CONNECT
         |
         v
-  Хамелеон-клиент                 <-- мультиплексор + шифрование
+  Chameleon client                 <-- multiplexer + encryption
         ║
-   === UDP (полиморфный шум) ===  <-- снаружи виден только рандом
+   === UDP (polymorphic noise) === <-- only random bytes on the wire
         ║
         v
-  Хамелеон-сервер                 <-- расшифровка + демультиплексор
+  Chameleon server                 <-- decryption + demultiplexer
         |  TCP
         v
-  Целевой хост (интернет)
+  Target host (internet)
 ```
 
-Из PSK через HKDF выводится **геном сессии** — полное описание wire format:
-- Псевдослучайный magic byte (фильтр «свой/чужой»)
-- Порядок полей в заголовке (Fisher-Yates shuffle)
-- 0-3 decoy-поля случайного размера
-- Размер nonce: 12 или 24 байт
-- Кодирование длины: uint16 BE / LE / varint / XOR-masked
-- Диапазон padding'а
+The PSK is expanded via HKDF into a **session genome** — a complete wire format specification:
+- Pseudorandom magic byte (friend-or-foe filter)
+- Header field order (Fisher-Yates shuffle)
+- 0-3 decoy fields of random size
+- Nonce size: 12 or 24 bytes
+- Length encoding: uint16 BE / LE / varint / XOR-masked
+- Padding range
 
-Обе стороны знают PSK -> знают геном -> могут общаться. Третья сторона видит шум с энтропией ~7.9 бит/байт.
+Both sides know the PSK -> both derive the same genome -> they can communicate. A third party sees noise with ~7.9 bits/byte entropy.
 
-## Архитектура
+## Architecture
 
-| Слой | Пакет | Назначение |
-|------|-------|------------|
-| Crypto | `crypto/` | AEAD (ChaCha20-Poly1305 / AES-256-GCM / XChaCha20), HKDF ключи |
-| Morph | `morph/` | Геном сессии, полиморфный framing (encode/decode) |
-| Mux | `mux/` | Мультиплексор потоков с надежной доставкой (SACK, fast retransmit, NewReno, flow control) |
-| Transport | `transport/` | UDP-туннель = morph framing + AEAD + anti-replay |
-| SOCKS5 | `socks5/` | SOCKS5 CONNECT сервер (RFC 1928) |
-| Proxy | `proxy/` | Клиент (SOCKS5 -> mux) и сервер (mux -> dial TCP) |
+| Layer | Package | Purpose |
+|-------|---------|---------|
+| Crypto | `crypto/` | AEAD (ChaCha20-Poly1305 / AES-256-GCM / XChaCha20), HKDF keys |
+| Morph | `morph/` | Session genome, polymorphic framing (encode/decode) |
+| Mux | `mux/` | Stream multiplexer with reliable delivery (SACK, fast retransmit, NewReno, flow control) |
+| Transport | `transport/` | UDP tunnel = morph framing + AEAD + anti-replay |
+| SOCKS5 | `socks5/` | SOCKS5 CONNECT server (RFC 1928) |
+| Proxy | `proxy/` | Client (SOCKS5 -> mux) and server (mux -> dial TCP) |
 
-## Установка сервера (одна команда)
+## Server Installation (one command)
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/william-aqn/genome/main/install-server.sh | sudo bash
 ```
 
-Скрипт:
-- Скачивает бинарник (или собирает из исходников)
-- Генерирует PSK
-- Открывает UDP-порт в файрволе (ufw/firewalld/iptables)
-- Создает systemd-сервис
-- Показывает команду для подключения клиента
+The script:
+- Downloads the binary (or builds from source)
+- Generates a PSK
+- Opens the UDP port in the firewall (ufw/firewalld/iptables)
+- Creates a systemd service
+- Prints the client connection command
 
-Повторный запуск обновляет только бинарник, сохраняя PSK, конфиг и порт.
+Re-running upgrades only the binary, preserving PSK, config, and port.
 
-## Производительность
+## Performance
 
-Замеры на реальном сервере (VDS, Россия -> Нидерланды):
+Measured on a real server (VDS, Russia -> Netherlands):
 
-| Метрика | Значение |
-|---------|----------|
-| Пиковая скорость | **30 Мбит/с** (3.75 MB/s) |
-| Speedtest.net (Ookla) | **2.16 / 1.17 Мбит/с** |
-| Загрузка 6.8 MB файла | **2 секунды** (стабильно, 5/5 попыток) |
-| Параллельные стримы | 67 одновременных запросов без зависаний |
-| Деградация | **нет** — скорость не падает между загрузками |
-| Шифрование | ChaCha20-Poly1305 |
-| Overhead | ~100-150 байт/пакет (morph header + AEAD + padding) |
+| Metric | Value |
+|--------|-------|
+| Peak throughput | **30 Mbit/s** (3.75 MB/s) |
+| Speedtest.net (Ookla) | **2.16 / 1.17 Mbit/s** |
+| 6.8 MB file download | **2 seconds** (stable, 5/5 attempts) |
+| Parallel streams | 67 simultaneous requests, zero stalls |
+| Degradation | **none** — no speed drop between downloads |
+| Encryption | ChaCha20-Poly1305 |
+| Overhead | ~100-150 bytes/packet (morph header + AEAD + padding) |
 
-## Клиент
+## Client
 
-### Интерактивный режим (без параметров)
+### Interactive mode (no arguments)
 
 ```
 > chameleon-client.exe
@@ -96,76 +98,76 @@ Chameleon Client — Interactive Setup
 ===========================================
 ```
 
-Конфиг сохраняется в `client.json` рядом с exe. При следующем запуске подхватывается автоматически — просто двойной клик.
+Config is saved to `client.json` next to the executable. On the next launch it is loaded automatically — just double-click.
 
-### С флагами
+### With flags
 
 ```bash
 ./chameleon-client -server SERVER_IP:9000 -psk $PSK -socks-user myuser -socks-pass mypass
 ```
 
-### Консольный дашборд
+### Console dashboard
 
-При запуске клиент показывает real-time дашборд с трафиком, активными соединениями и логами. Для отладки без UI:
+The client displays a real-time dashboard with traffic stats, active connections, and logs. For debugging without UI:
 
 ```bash
 ./chameleon-client -no-ui -log debug
 ```
 
-### Использование
+### Usage
 
 ```bash
-# curl через туннель
+# curl through the tunnel
 curl --proxy socks5://user:pass@127.0.0.1:1080 https://example.com
 
-# Браузер: настроить SOCKS5-прокси на 127.0.0.1:1080 с логином/паролем
+# Browser: set SOCKS5 proxy to 127.0.0.1:1080 with username/password
 ```
 
-## Сервер (ручная настройка)
+## Server (manual setup)
 
 ```bash
 PSK=$(openssl rand -hex 32)
 ./chameleon-server -listen :9000 -psk $PSK
 ```
 
-## Сборка
+## Building
 
 ```bash
-# Один бинарник
+# Single binary
 go build -o chameleon-client ./cmd/client
 go build -o chameleon-server ./cmd/server
 
-# Кросс-компиляция (linux/windows, amd64/arm64)
+# Cross-compile (linux/windows, amd64/arm64)
 bash build.sh
 ```
 
-## Флаги CLI
+## CLI Flags
 
-### Клиент
+### Client
 
-| Флаг | По умолчанию | Описание |
-|------|-------------|----------|
-| `-psk` | | PSK в hex |
-| `-server` | | Адрес сервера (host:port) |
-| `-socks` | случайный порт | Адрес SOCKS5-прокси |
-| `-socks-user` | случайный | SOCKS5 логин (RFC 1929) |
-| `-socks-pass` | случайный | SOCKS5 пароль |
-| `-cipher` | `chacha20` | `chacha20` или `aes256gcm` |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-psk` | | PSK in hex |
+| `-server` | | Server address (host:port) |
+| `-socks` | random port | SOCKS5 proxy address |
+| `-socks-user` | random | SOCKS5 username (RFC 1929) |
+| `-socks-pass` | random | SOCKS5 password |
+| `-cipher` | `chacha20` | `chacha20` or `aes256gcm` |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
-| `-no-ui` | `false` | Отключить дашборд, чистые логи |
-| `-config` | `client.json` | Путь к JSON-конфигу (авто-поиск рядом с exe) |
+| `-no-ui` | `false` | Disable dashboard, plain logs |
+| `-config` | `client.json` | Path to JSON config (auto-detected next to exe) |
 
-### Сервер
+### Server
 
-| Флаг | По умолчанию | Описание |
-|------|-------------|----------|
-| `-psk` | | PSK в hex |
-| `-listen` | `:9000` | UDP listen адрес |
-| `-cipher` | `chacha20` | `chacha20` или `aes256gcm` |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-psk` | | PSK in hex |
+| `-listen` | `:9000` | UDP listen address |
+| `-cipher` | `chacha20` | `chacha20` or `aes256gcm` |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
-| `-config` | | Путь к JSON-конфигу |
+| `-config` | | Path to JSON config |
 
-### JSON-конфиг
+### JSON config
 
 ```json
 {
@@ -181,57 +183,57 @@ bash build.sh
 }
 ```
 
-## Тесты
+## Tests
 
 ```bash
-go test ./... -v          # все тесты
+go test ./... -v          # all tests
 bash test.sh              # vet + unit + integration + race detector
-bash e2e-test.sh          # полный тест: билд, клиент+сервер, curl через туннель
+bash e2e-test.sh          # full test: build, client+server, curl through tunnel
 ```
 
-Покрытие:
-- **Детерминизм**: одинаковый seed -> идентичный геном и PRNG
-- **Round-trip**: encode -> decode для всех слоев (frame, command, AEAD)
-- **Энтропия**: wire output >= 7.9 бит/байт (тест Шеннона)
+Coverage:
+- **Determinism**: same seed -> identical genome and PRNG output
+- **Round-trip**: encode -> decode for all layers (frame, command, AEAD)
+- **Entropy**: wire output >= 7.9 bits/byte (Shannon test)
 - **Replay protection**: anti-replay sliding window
-- **Mux**: буферы отправки/приема, SACK, RTT estimator, NewReno, flow control
+- **Mux**: send/receive buffers, SACK, RTT estimator, NewReno, flow control
 - **SOCKS5**: IPv4, domain, unsupported command rejection
-- **End-to-end**: HTTP через SOCKS5 -> tunnel -> HTTP-сервер
-- **Параллельные потоки**: 10 одновременных запросов через туннель
+- **End-to-end**: HTTP via SOCKS5 -> tunnel -> HTTP server
+- **Parallel streams**: 10 simultaneous requests through tunnel
 
-## Диагностика
+## Diagnostics
 
 ```bash
-# Проверить связь с сервером
+# Check connectivity to server
 go run ./cmd/probe SERVER_IP:PORT PSK_HEX
 ```
 
-Probe отправляет один OPEN-пакет и показывает ответ сервера или причину дропа (decode/replay/aead).
+Probe sends a single OPEN packet and prints the server response or drop reason (decode/replay/aead).
 
-## Структура проекта
+## Project Structure
 
 ```
 genome/
 ├── cmd/
-│   ├── client/main.go          # CLI клиента
-│   ├── server/main.go          # CLI сервера
-│   └── probe/main.go           # Диагностика туннеля
-├── config/config.go            # Конфигурация
+│   ├── client/main.go          # Client CLI
+│   ├── server/main.go          # Server CLI
+│   └── probe/main.go           # Tunnel diagnostics
+├── config/config.go            # Configuration
 ├── crypto/
 │   ├── aead.go                 # AEAD ciphers
 │   └── keys.go                 # HKDF key derivation
 ├── internal/
-│   ├── logger/logger.go        # slog обертка
-│   └── randutil/deterministic.go # Детерминистический PRNG
+│   ├── logger/logger.go        # slog wrapper
+│   └── randutil/deterministic.go # Deterministic PRNG
 ├── morph/
 │   ├── genome.go               # Derive(seed) -> Genome
 │   ├── frame.go                # Encode/Decode wire packets
-│   ├── lengthcodec.go          # 4 варианта кодирования длины
-│   └── padding.go              # Рандомный padding
+│   ├── lengthcodec.go          # 4 length encoding variants
+│   └── padding.go              # Random padding
 ├── mux/
 │   ├── command.go              # OPEN/DATA/CLOSE/ACK
-│   ├── stream.go               # io.ReadWriteCloser поток
-│   ├── session.go              # Менеджер потоков
+│   ├── stream.go               # io.ReadWriteCloser stream
+│   ├── session.go              # Stream manager
 │   ├── reliability.go          # Retransmit, SACK, RTT
 │   ├── congestion.go           # NewReno
 │   └── flowcontrol.go          # Per-stream flow control
@@ -242,16 +244,16 @@ genome/
 ├── transport/
 │   ├── tunnel.go               # UDP + morph + AEAD
 │   └── shaper.go               # Timing jitter
-├── build.sh                    # Кросс-компиляция
-├── test.sh                     # Полный тест-сьют
-├── e2e-test.sh                 # Live-тест через туннель
-├── release.sh                  # Публикация GitHub-релиза
-└── install-server.sh           # Установка сервера в одну строку
+├── build.sh                    # Cross-compile
+├── test.sh                     # Full test suite
+├── e2e-test.sh                 # Live tunnel test
+├── release.sh                  # GitHub release
+└── install-server.sh           # One-line server deploy
 ```
 
-## Надежность доставки (TCP-over-UDP)
+## Reliable Delivery (TCP-over-UDP)
 
-Мультиплексор обеспечивает:
+The multiplexer provides:
 - Per-stream sequence numbers
 - Selective ACK (SACK)
 - Fast retransmit (3 duplicate ACKs)
@@ -260,22 +262,22 @@ genome/
 - Per-stream flow control (receive window)
 - Keepalive / idle timeout
 
-## Модель угроз
+## Threat Model
 
-- **Пассивный наблюдатель с DPI**: не может построить сигнатуру — каждая сессия структурно уникальна
-- **Replay attack**: anti-replay sliding window (256 эпох), случайный начальный epoch
-- **Tampered packets**: AEAD аутентификация, epoch в additional data
-- **Active probing**: сервер не отвечает без валидного первого пакета (PSK-only)
+- **Passive observer with DPI**: cannot build a signature — each session is structurally unique
+- **Replay attack**: anti-replay sliding window (256 epochs), random initial epoch
+- **Tampered packets**: AEAD authentication, epoch in associated data
+- **Active probing**: server does not respond without a valid first packet (PSK-only)
 
-### Известные ограничения
+### Known Limitations
 
-- Высокоэнтропийный трафик может быть заблокирован по признаку «слишком случайный» (парадокс шума)
-- PSK обменивается out-of-band
-- Нет forward secrecy без ECDH handshake (запланировано)
+- High-entropy traffic may be blocked as "too random" (noise paradox)
+- PSK is exchanged out-of-band
+- No forward secrecy without ECDH handshake (planned)
 
-## Зависимости
+## Dependencies
 
 - `golang.org/x/crypto` — ChaCha20-Poly1305
-- `golang.org/x/net` — SOCKS5 клиент (только в тестах)
+- `golang.org/x/net` — SOCKS5 client (test-only)
 
-Все остальное — стандартная библиотека Go.
+Everything else is Go standard library.
