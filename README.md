@@ -1,6 +1,6 @@
 # Chameleon (genome)
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19493211.svg)](https://doi.org/10.5281/zenodo.19493211)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19493212.svg)](https://doi.org/10.5281/zenodo.19493212)
 
 Polymorphic UDP tunneling protocol. Each session derives a unique wire format ("genome") deterministically from a pre-shared key (PSK). Without the PSK, an observer sees only random bytes — no magic bytes, fixed headers, or recognizable handshakes.
 

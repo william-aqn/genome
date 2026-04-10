@@ -5,7 +5,7 @@ type: software
 authors:
   - name: "william-aqn"
     orcid: "https://orcid.org/0009-0005-4749-1606"
-doi: "10.5281/zenodo.19493211"
+doi: "10.5281/zenodo.19493212"
 repository-code: "https://github.com/william-aqn/genome"
 url: "https://github.com/william-aqn/genome"
 abstract: >-
