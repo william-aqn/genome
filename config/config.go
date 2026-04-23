@@ -38,6 +38,22 @@ type Config struct {
 
 	// IdleTimeout for the tunnel session.
 	IdleTimeoutSec int `json:"idle_timeout_sec,omitempty"`
+
+	// StreamMode enables constant-rate cover traffic ("поток"). When set,
+	// the tunnel emits a steady flow of genome-sized "wagons" regardless
+	// of real user activity, carrying real data when present and random
+	// chaff otherwise. Both endpoints must enable it for traffic to parse.
+	StreamMode bool `json:"stream_mode,omitempty"`
+
+	// StreamMinBytesPerSec is the lower bound of the chaff-flow rate
+	// envelope (plaintext bytes/sec). The pump's current target rate drifts
+	// randomly between this and StreamMaxBytesPerSec.
+	StreamMinBytesPerSec int `json:"stream_min_bytes_per_sec,omitempty"`
+
+	// StreamMaxBytesPerSec is the upper bound of the chaff-flow rate
+	// envelope. When the real-data queue backs up the pump bursts beyond
+	// this cap and drains "as is".
+	StreamMaxBytesPerSec int `json:"stream_max_bytes_per_sec,omitempty"`
 }
 
 // Defaults fills in default values for unset fields.
@@ -53,6 +69,14 @@ func (c *Config) Defaults() {
 	}
 	if c.IdleTimeoutSec == 0 {
 		c.IdleTimeoutSec = 300 // 5 minutes
+	}
+	if c.StreamMode {
+		if c.StreamMinBytesPerSec == 0 {
+			c.StreamMinBytesPerSec = 100_000 // ~100 KB/s
+		}
+		if c.StreamMaxBytesPerSec == 0 {
+			c.StreamMaxBytesPerSec = 700_000 // ~700 KB/s
+		}
 	}
 }
 
@@ -70,6 +94,14 @@ func (c *Config) Validate() error {
 	}
 	if c.ListenAddr == "" {
 		return fmt.Errorf("config: listen_addr is required")
+	}
+	if c.StreamMode {
+		if c.StreamMinBytesPerSec < 1_000 || c.StreamMinBytesPerSec > 100_000_000 {
+			return fmt.Errorf("config: stream_min_bytes_per_sec=%d out of range [1000, 1e8]", c.StreamMinBytesPerSec)
+		}
+		if c.StreamMaxBytesPerSec < c.StreamMinBytesPerSec || c.StreamMaxBytesPerSec > 100_000_000 {
+			return fmt.Errorf("config: stream_max_bytes_per_sec=%d must be ≥ min and ≤ 1e8", c.StreamMaxBytesPerSec)
+		}
 	}
 	return nil
 }
