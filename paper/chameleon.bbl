@@ -41,8 +41,9 @@ Kevin~P. Dyer, Scott~E. Coull, Thomas Ristenpart, and Thomas Shrimpton.
 
 \bibitem{fisher1938statistical}
 Ronald~A. Fisher and Frank Yates.
-\newblock Statistical tables for biological, agricultural and medical research.
-\newblock Edinburgh, 1938. Oliver and Boyd.
+\newblock {\em Statistical Tables for Biological, Agricultural and Medical
+  Research}.
+\newblock Oliver and Boyd, Edinburgh, 1938.
 
 \bibitem{rfc6582}
 T.~Henderson, S.~Floyd, A.~Gurtov, and Y.~Nishida.
@@ -82,6 +83,8 @@ Andriy Panchenko, Fabian Lanze, Jan Pennekamp, Thomas Engel, Andreas Zinnen,
 \newblock Website fingerprinting at {Internet} scale.
 \newblock In {\em Proceedings of the Network and Distributed System Security
   Symposium (NDSS)}, 2016.
+\newblock
+  \url{https://www.ndss-symposium.org/wp-content/uploads/2017/09/website-fingerprinting-internet-scale.pdf}.
 
 \bibitem{shadowsocks}
 {Shadowsocks Contributors}.
@@ -107,11 +110,13 @@ Philipp Winter, Tobias Pulls, and Juergen Fuss.
 \newblock In {\em Proceedings of the 12th ACM Workshop on Privacy in the
   Electronic Society (WPES)}, pages 213--224, 2013.
 
-\bibitem{wright2008spot}
+\bibitem{wright2009morphing}
 Charles~V. Wright, Scott~E. Coull, and Fabian Monrose.
 \newblock Traffic morphing: An efficient defense against statistical traffic
   analysis.
 \newblock In {\em Proceedings of the Network and Distributed System Security
   Symposium (NDSS)}, 2009.
+\newblock
+  \url{https://www.ndss-symposium.org/ndss2009/traffic-morphing-efficient-defense-against-statistical-traffic-analysis/}.
 
 \end{thebibliography}
