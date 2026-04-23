@@ -71,11 +71,15 @@ func (c *Config) Defaults() {
 		c.IdleTimeoutSec = 300 // 5 minutes
 	}
 	if c.StreamMode {
+		// Defaults tuned to give realistic browsing + small downloads room
+		// to run without constantly triggering burst (which briefly breaks
+		// the constant-rate cover). For pure chaff-only cover, users can
+		// narrow the envelope via config.
 		if c.StreamMinBytesPerSec == 0 {
-			c.StreamMinBytesPerSec = 100_000 // ~100 KB/s
+			c.StreamMinBytesPerSec = 500_000 // ~500 KB/s
 		}
 		if c.StreamMaxBytesPerSec == 0 {
-			c.StreamMaxBytesPerSec = 700_000 // ~700 KB/s
+			c.StreamMaxBytesPerSec = 3_000_000 // ~3 MB/s
 		}
 	}
 }

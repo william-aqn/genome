@@ -1,7 +1,6 @@
 package transport
 
 import (
-	crand "crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -29,12 +28,11 @@ var ErrPayloadTooLarge = errors.New("transport: payload exceeds wagon capacity")
 //
 // RealLen==0 marks a pure-chaff wagon; the receiver silently drops it.
 type StreamPump struct {
-	tunnel         *Tunnel
-	minRate        int // bytes/sec (plaintext)
-	maxRate        int // bytes/sec (plaintext)
-	wagonMin       int
-	wagonMax       int
-	burstThreshold int
+	tunnel   *Tunnel
+	minRate  int // bytes/sec (plaintext)
+	maxRate  int // bytes/sec (plaintext)
+	wagonMin int
+	wagonMax int
 
 	queue chan []byte
 
@@ -47,17 +45,29 @@ type StreamPump struct {
 }
 
 const (
-	// streamQueueCap caps the pending mux commands awaiting a wagon. A small
-	// cap is enough because mux enforces its own flow control above us.
-	streamQueueCap = 128
-	// streamBurstFraction: when queue ≥ streamQueueCap/streamBurstFraction, pump
-	// drops the rate limit and drains "as is".
-	streamBurstFraction = 2
+	// streamQueueCap caps the pending mux commands awaiting a wagon. It must
+	// be large enough that mux can produce several wagons ahead of the drain
+	// rate — otherwise mux.Write blocks on Enqueue, which starves the queue
+	// and prevents burst from ever engaging. 1024 × ~1.2 KB ≈ 1.2 MB headroom.
+	streamQueueCap = 1024
+	// streamBurstThreshold: when queue ≥ this, pump drops the rate limit and
+	// drains "as is" until queue falls below it. Lower than cap/2 so burst
+	// engages earlier, before mux starts blocking at Enqueue.
+	streamBurstThreshold = 128
+	// streamBurstReleaseThreshold: hysteresis — once in burst, stay there
+	// until queue drops this low. Prevents flapping on every packet.
+	streamBurstReleaseThreshold = 32
 	// streamRateDriftInterval controls how often currentRate is nudged.
 	streamRateDriftInterval = 1 * time.Second
 	// streamMaxCatchUp bounds how far behind schedule the pump will fall
 	// before resynchronizing nextSendAt to now (avoids perma-burst on hiccups).
 	streamMaxCatchUp = 1 * time.Second
+	// streamBurstMultiplier: in burst mode the pump drains at at most
+	// (maxRate × this) bytes/sec. Uncapped burst floods UDP and causes
+	// mux to see packet loss → give up → close the stream. This cap
+	// keeps burst meaningfully faster than the cover envelope while
+	// staying within what the kernel/NIC can swallow without drops.
+	streamBurstMultiplier = 4
 )
 
 // NewStreamPump creates a pump bound to the given tunnel with the supplied
@@ -76,15 +86,14 @@ func NewStreamPump(t *Tunnel, minRate, maxRate int) (*StreamPump, error) {
 		return nil, fmt.Errorf("transport: genome has invalid wagon range")
 	}
 	return &StreamPump{
-		tunnel:         t,
-		minRate:        minRate,
-		maxRate:        maxRate,
-		wagonMin:       g.WagonMin,
-		wagonMax:       g.WagonMax,
-		burstThreshold: streamQueueCap / streamBurstFraction,
-		queue:          make(chan []byte, streamQueueCap),
-		stop:           make(chan struct{}),
-		done:           make(chan struct{}),
+		tunnel:   t,
+		minRate:  minRate,
+		maxRate:  maxRate,
+		wagonMin: g.WagonMin,
+		wagonMax: g.WagonMax,
+		queue:    make(chan []byte, streamQueueCap),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}, nil
 }
 
@@ -147,6 +156,11 @@ func (p *StreamPump) pumpLoop() {
 	currentRate := p.randRate()
 	nextDrift := time.Now().Add(streamRateDriftInterval)
 	nextSendAt := time.Now()
+	inBurst := false
+
+	// Scratch buffer for wagon plaintext. Reused across ticks so we don't
+	// allocate ~1 KB per packet (meaningful at high rates).
+	scratch := make([]byte, p.wagonMax)
 
 	for {
 		// Rate drift (slow random walk within the envelope).
@@ -155,25 +169,31 @@ func (p *StreamPump) pumpLoop() {
 			nextDrift = now.Add(streamRateDriftInterval)
 		}
 
-		// Burst: skip the rate-limit wait if the queue is backed up.
-		burst := len(p.queue) >= p.burstThreshold
-		if !burst {
-			wait := time.Until(nextSendAt)
-			if wait > 0 {
-				t := time.NewTimer(wait)
-				select {
-				case <-t.C:
-				case <-p.stop:
-					t.Stop()
-					return
-				}
-			} else {
-				// Still check for stop to ensure responsive shutdown.
-				select {
-				case <-p.stop:
-					return
-				default:
-				}
+		// Burst hysteresis: enter at high-water mark, leave at low-water mark.
+		// This stops the pump from flapping between rate-limited and burst
+		// every few packets when the queue hovers around a single threshold.
+		ql := len(p.queue)
+		if !inBurst && ql >= streamBurstThreshold {
+			inBurst = true
+		} else if inBurst && ql <= streamBurstReleaseThreshold {
+			inBurst = false
+			nextSendAt = time.Now() // resync so we don't immediately re-fire
+		}
+
+		// Apply rate control. In burst we use a relaxed rate (maxRate × mult)
+		// rather than zero throttle, so we don't overrun UDP buffers.
+		effectiveRate := currentRate
+		if inBurst {
+			effectiveRate = p.maxRate * streamBurstMultiplier
+		}
+		wait := time.Until(nextSendAt)
+		if wait > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case <-t.C:
+			case <-p.stop:
+				t.Stop()
+				return
 			}
 		} else {
 			select {
@@ -190,10 +210,11 @@ func (p *StreamPump) pumpLoop() {
 		}
 
 		// Before the server learns its peer the pump has nowhere to send.
-		// Hold the cadence but don't consume the queue or emit — otherwise
-		// we'd either spam drops or lose real payloads.
+		// Hold the cadence but don't consume the queue or emit.
 		if !p.tunnel.hasPeer() {
-			p.scheduleNext(&nextSendAt, wagonSize, currentRate)
+			if !inBurst {
+				p.scheduleNext(&nextSendAt, wagonSize, currentRate)
+			}
 			continue
 		}
 
@@ -204,9 +225,8 @@ func (p *StreamPump) pumpLoop() {
 		default:
 		}
 
-		wagon, err := buildWagon(payload, wagonSize)
+		wagon, err := fillWagon(scratch[:wagonSize], payload)
 		if err != nil {
-			// Should not happen: Enqueue enforces payload size.
 			if p.tunnel.onDrop != nil {
 				p.tunnel.onDrop("wagon-build", err)
 			}
@@ -219,13 +239,11 @@ func (p *StreamPump) pumpLoop() {
 			}
 		}
 
-		if burst && p.onBurstTick != nil {
+		if inBurst && p.onBurstTick != nil {
 			p.onBurstTick()
 		}
 
-		// Schedule the next send. In burst mode interval is still computed
-		// so that when the queue drains we're back on schedule.
-		p.scheduleNext(&nextSendAt, wagonSize, currentRate)
+		p.scheduleNext(&nextSendAt, wagonSize, effectiveRate)
 	}
 }
 
@@ -271,26 +289,35 @@ func (p *StreamPump) driftRate(current int) int {
 	return next
 }
 
-// buildWagon packs a plaintext wagon of exactly `size` bytes.
-// payload may be nil/empty (pure chaff) or up to size-2 bytes of real data.
-func buildWagon(payload []byte, size int) ([]byte, error) {
+// fillWagon writes a plaintext wagon of exactly len(buf) bytes into buf and
+// returns buf. payload may be nil/empty (pure chaff) or up to len(buf)-2
+// bytes of real data. The filler tail is left as zeros — AEAD encryption
+// randomizes the wire bytes, and the receiver never inspects filler (it
+// reads only RealLen and the first RealLen bytes after it). Skipping
+// crand.Read avoids a ~300 ns/packet syscall at high rates.
+func fillWagon(buf []byte, payload []byte) ([]byte, error) {
+	size := len(buf)
 	if size < 2 {
 		return nil, fmt.Errorf("transport: wagon size %d too small", size)
 	}
 	if len(payload) > size-2 {
 		return nil, ErrPayloadTooLarge
 	}
-	buf := make([]byte, size)
 	binary.BigEndian.PutUint16(buf[:2], uint16(len(payload)))
-	if len(payload) > 0 {
-		copy(buf[2:], payload)
-	}
+	copy(buf[2:], payload)
+	// Zero the filler tail so stale bytes from the previous wagon don't
+	// leak into this one. `clear` compiles to memclr — faster than crand.
 	if tail := buf[2+len(payload):]; len(tail) > 0 {
-		if _, err := crand.Read(tail); err != nil {
-			return nil, fmt.Errorf("transport: chaff fill: %w", err)
-		}
+		clear(tail)
 	}
 	return buf, nil
+}
+
+// buildWagon is the non-in-place variant kept for tests and callers that
+// want a fresh allocation. Prefer fillWagon in hot paths.
+func buildWagon(payload []byte, size int) ([]byte, error) {
+	buf := make([]byte, size)
+	return fillWagon(buf, payload)
 }
 
 // parseWagon extracts the real-payload slice from a wagon plaintext.
