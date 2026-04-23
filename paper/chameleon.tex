@@ -116,7 +116,7 @@ The rest of this paper is organized as follows. \cref{sec:related} surveys relat
 
 \paragraph{Tor pluggable transports.} The Tor Project introduced the pluggable transport framework to decouple transport obfuscation from the Tor protocol itself \cite{dingledine2004tor}. Notable transports include:
 \begin{itemize}[nosep]
-  \item \textbf{obfs4} \cite{obfs4spec}: Uses a Curve25519 handshake with Elligator~2 encoding \cite{bernstein2012elligator} to make the initial key exchange indistinguishable from random. Post-handshake, obfs4 applies NaCl secret-box encryption. However, the handshake phase has a fixed two-message structure that sophisticated DPI can detect through timing and length analysis.
+  \item \textbf{obfs4} \cite{obfs4spec}: Uses a Curve25519 handshake with Elligator~2 encoding \cite{bernstein2013elligator} to make the initial key exchange indistinguishable from random. Post-handshake, obfs4 applies NaCl secret-box encryption. However, the handshake phase has a fixed two-message structure that sophisticated DPI can detect through timing and length analysis.
   \item \textbf{ScrambleSuit} \cite{winter2013scramblesuit}: A predecessor to obfs4 that introduced polymorphic padding and session ticket authentication. ScrambleSuit's wire format is fixed once the session is established.
   \item \textbf{meek and Snowflake}: Domain-fronting and WebRTC-based transports that piggyback on legitimate cloud infrastructure. These are orthogonal to wire-format polymorphism and face distinct challenges (cost, latency, provider cooperation).
 \end{itemize}
@@ -723,7 +723,7 @@ Two factors motivated the tuning. (i)~The original queue capacity of 128 wagons 
 % ============================================================
 \section{Future Work}\label{sec:future}
 
-\paragraph{Forward secrecy via ECDH.} Integrating an ephemeral Curve25519 key exchange with Elligator~2 encoding \cite{bernstein2006curve25519,bernstein2012elligator} would provide forward secrecy while maintaining the indistinguishability property. The exchanged ephemeral secret would serve as the HKDF salt, causing the genome to change per-session even with a fixed PSK.
+\paragraph{Forward secrecy via ECDH.} Integrating an ephemeral Curve25519 key exchange with Elligator~2 encoding \cite{bernstein2006curve25519,bernstein2013elligator} would provide forward secrecy while maintaining the indistinguishability property. The exchanged ephemeral secret would serve as the HKDF salt, causing the genome to change per-session even with a fixed PSK.
 
 \paragraph{BBR congestion control.} The current NewReno implementation can underperform on high-bandwidth, high-latency links. Implementing BBR (Bottleneck Bandwidth and Round-trip propagation time) would improve throughput on such paths. The multiplexer's \texttt{CongestionController} interface supports drop-in replacement.
 
