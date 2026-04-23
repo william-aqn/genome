@@ -39,6 +39,15 @@ type Genome struct {
 	PadMax        int            // maximum padding bytes
 	TagSize       int            // always 16 (Poly1305/GCM)
 	EpochSize     int            // always 4 (uint32)
+
+	// Stream-mode wagon size range (plaintext size inside AEAD).
+	// Each tick the pump draws a fresh wagon size from [WagonMin, WagonMax].
+	// Always derived (even when stream mode is off at runtime) so both
+	// endpoints know the envelope when/if they enable it.
+	// Invariant: WagonMin >= muxMSS + 2 so any MSS-sized mux command fits
+	// inside the shortest wagon with a 2-byte length prefix.
+	WagonMin int
+	WagonMax int
 }
 
 // Derive deterministically generates a Genome from a seed.
@@ -106,6 +115,15 @@ func Derive(seed []byte) *Genome {
 	g.PadMin = r.Intn(16)                // 0-15
 	g.PadMax = g.PadMin + r.Intn(64) + 1 // at least 1 more than PadMin
 
+	// Stream-mode wagon size range (plaintext bytes inside AEAD).
+	// muxMSS=1200 mirrors mux.MSS; inline to avoid a morph→mux import cycle.
+	// Max mux.Command size ≈ muxMSS+9 (CmdData header), so WagonMin must leave
+	// room for that plus the 2-byte RealLen prefix. WagonMax is bounded so
+	// wagon + AEAD tag + worst-case morph header + padding stays under UDP MTU.
+	const muxMSS = 1200
+	g.WagonMin = muxMSS + 16 + r.Intn(16)     // 1216..1231
+	g.WagonMax = g.WagonMin + r.Intn(80) + 24 // +24..+103 → max ≈ 1334
+
 	return g
 }
 
@@ -166,8 +184,8 @@ func (g *Genome) String() string {
 			fieldOrder += fmt.Sprintf("D%d", f.Size)
 		}
 	}
-	return fmt.Sprintf("Genome{magic=0x%02x nonce=%d lenEnc=%d fields=[%s] pad=[%d,%d]}",
-		g.MagicByte, g.NonceSize, g.LengthEnc, fieldOrder, g.PadMin, g.PadMax)
+	return fmt.Sprintf("Genome{magic=0x%02x nonce=%d lenEnc=%d fields=[%s] pad=[%d,%d] wagon=[%d,%d]}",
+		g.MagicByte, g.NonceSize, g.LengthEnc, fieldOrder, g.PadMin, g.PadMax, g.WagonMin, g.WagonMax)
 }
 
 // Equal checks if two genomes are identical.
@@ -180,6 +198,8 @@ func (g *Genome) Equal(other *Genome) bool {
 		g.PadMax != other.PadMax ||
 		g.TagSize != other.TagSize ||
 		g.EpochSize != other.EpochSize ||
+		g.WagonMin != other.WagonMin ||
+		g.WagonMax != other.WagonMax ||
 		len(g.Fields) != len(other.Fields) {
 		return false
 	}

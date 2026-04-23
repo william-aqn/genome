@@ -29,16 +29,19 @@ import (
 
 func main() {
 	var (
-		cfgPath    = flag.String("config", "", "path to config JSON file")
-		serverAddr = flag.String("server", "", "server UDP address (host:port)")
-		socksAddr  = flag.String("socks", "", "SOCKS5 listen address")
-		socksUser  = flag.String("socks-user", "", "SOCKS5 username (enables auth)")
-		socksPass  = flag.String("socks-pass", "", "SOCKS5 password (enables auth)")
-		pskHex     = flag.String("psk", "", "pre-shared key (hex)")
-		cipher     = flag.String("cipher", "chacha20", "cipher suite: chacha20 or aes256gcm")
-		logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")
-		noUI       = flag.Bool("no-ui", false, "disable dashboard, plain log output")
-		noAuth     = flag.Bool("no-auth", false, "disable SOCKS5 authentication")
+		cfgPath      = flag.String("config", "", "path to config JSON file")
+		serverAddr   = flag.String("server", "", "server UDP address (host:port)")
+		socksAddr    = flag.String("socks", "", "SOCKS5 listen address")
+		socksUser    = flag.String("socks-user", "", "SOCKS5 username (enables auth)")
+		socksPass    = flag.String("socks-pass", "", "SOCKS5 password (enables auth)")
+		pskHex       = flag.String("psk", "", "pre-shared key (hex)")
+		cipher       = flag.String("cipher", "chacha20", "cipher suite: chacha20 or aes256gcm")
+		logLevel     = flag.String("log", "info", "log level: debug, info, warn, error")
+		noUI         = flag.Bool("no-ui", false, "disable dashboard, plain log output")
+		noAuth       = flag.Bool("no-auth", false, "disable SOCKS5 authentication")
+		streamMode   = flag.Bool("stream", false, "enable constant-rate stream mode (cover traffic)")
+		streamMinBps = flag.Int("stream-min-bps", 0, "stream mode: min flow rate in bytes/sec (default 100000)")
+		streamMaxBps = flag.Int("stream-max-bps", 0, "stream mode: max flow rate in bytes/sec (default 700000)")
 	)
 	flag.Parse()
 
@@ -64,14 +67,17 @@ func main() {
 	} else if *pskHex != "" && *serverAddr != "" {
 		// All from flags.
 		cfg = config.Config{
-			PSKHex:          *pskHex,
-			ListenAddr:      ":0",
-			PeerAddr:        *serverAddr,
-			SOCKSAddr:       *socksAddr,
-			SOCKSUser:       *socksUser,
-			SOCKSPass:       *socksPass,
-			CipherSuiteName: *cipher,
-			LogLevel:        *logLevel,
+			PSKHex:               *pskHex,
+			ListenAddr:           ":0",
+			PeerAddr:             *serverAddr,
+			SOCKSAddr:            *socksAddr,
+			SOCKSUser:            *socksUser,
+			SOCKSPass:            *socksPass,
+			CipherSuiteName:      *cipher,
+			LogLevel:             *logLevel,
+			StreamMode:           *streamMode,
+			StreamMinBytesPerSec: *streamMinBps,
+			StreamMaxBytesPerSec: *streamMaxBps,
 		}
 	} else {
 		// Interactive mode.
@@ -81,6 +87,18 @@ func main() {
 			cfg.LogLevel = *logLevel
 		}
 	}
+	// Flag overrides (applied even when loading from a config file so users
+	// can toggle stream mode from CLI without editing JSON).
+	if *streamMode {
+		cfg.StreamMode = true
+	}
+	if *streamMinBps > 0 {
+		cfg.StreamMinBytesPerSec = *streamMinBps
+	}
+	if *streamMaxBps > 0 {
+		cfg.StreamMaxBytesPerSec = *streamMaxBps
+	}
+
 	cfg.Defaults()
 
 	// Disable auth if requested.
@@ -152,6 +170,19 @@ func main() {
 
 	shaper := transport.NewShaper(0, 0)
 	tunnel := transport.NewTunnel(conn, peerUDP, aead, keys.NonceBase, genome, shaper)
+
+	if cfg.StreamMode {
+		pump, perr := transport.NewStreamPump(tunnel, cfg.StreamMinBytesPerSec, cfg.StreamMaxBytesPerSec)
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "Error: stream pump: %v\n", perr)
+			os.Exit(1)
+		}
+		tunnel.AttachPump(pump)
+		log.Info("stream mode enabled",
+			"min_bps", cfg.StreamMinBytesPerSec,
+			"max_bps", cfg.StreamMaxBytesPerSec,
+			"wagon", fmt.Sprintf("[%d,%d]", genome.WagonMin, genome.WagonMax))
+	}
 
 	var dash *dashboard.Dashboard
 	if useUI {

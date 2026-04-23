@@ -22,11 +22,14 @@ import (
 
 func main() {
 	var (
-		cfgPath    = flag.String("config", "", "path to config JSON file")
-		listenAddr = flag.String("listen", ":9000", "UDP listen address")
-		pskHex     = flag.String("psk", "", "pre-shared key (hex)")
-		cipher     = flag.String("cipher", "chacha20", "cipher suite: chacha20 or aes256gcm")
-		logLevel   = flag.String("log", "info", "log level: debug, info, warn, error")
+		cfgPath      = flag.String("config", "", "path to config JSON file")
+		listenAddr   = flag.String("listen", ":9000", "UDP listen address")
+		pskHex       = flag.String("psk", "", "pre-shared key (hex)")
+		cipher       = flag.String("cipher", "chacha20", "cipher suite: chacha20 or aes256gcm")
+		logLevel     = flag.String("log", "info", "log level: debug, info, warn, error")
+		streamMode   = flag.Bool("stream", false, "enable constant-rate stream mode (cover traffic)")
+		streamMinBps = flag.Int("stream-min-bps", 0, "stream mode: min flow rate in bytes/sec (default 100000)")
+		streamMaxBps = flag.Int("stream-max-bps", 0, "stream mode: max flow rate in bytes/sec (default 700000)")
 	)
 	flag.Parse()
 
@@ -47,6 +50,18 @@ func main() {
 		}
 		cfg.Defaults()
 	}
+
+	// Flag overrides (work alongside a config file).
+	if *streamMode {
+		cfg.StreamMode = true
+	}
+	if *streamMinBps > 0 {
+		cfg.StreamMinBytesPerSec = *streamMinBps
+	}
+	if *streamMaxBps > 0 {
+		cfg.StreamMaxBytesPerSec = *streamMaxBps
+	}
+	cfg.Defaults()
 
 	if cfg.PSKHex == "" {
 		fmt.Fprintln(os.Stderr, "Error: PSK is required. Use -psk flag or config file.")
@@ -94,6 +109,19 @@ func main() {
 	tunnel.SetDropCallback(func(reason string, err error) {
 		log.Warn("packet dropped", "reason", reason, "err", err)
 	})
+
+	if cfg.StreamMode {
+		pump, perr := transport.NewStreamPump(tunnel, cfg.StreamMinBytesPerSec, cfg.StreamMaxBytesPerSec)
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "Error: stream pump: %v\n", perr)
+			os.Exit(1)
+		}
+		tunnel.AttachPump(pump)
+		log.Info("stream mode enabled",
+			"min_bps", cfg.StreamMinBytesPerSec,
+			"max_bps", cfg.StreamMaxBytesPerSec,
+			"wagon", fmt.Sprintf("[%d,%d]", genome.WagonMin, genome.WagonMax))
+	}
 
 	session := mux.NewSession(tunnel, false, log)
 	session.SetIdleTimeout(0) // server waits forever for clients

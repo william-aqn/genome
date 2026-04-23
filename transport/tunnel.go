@@ -35,6 +35,7 @@ type Tunnel struct {
 	encoder   *morph.Encoder
 	decoder   *morph.Decoder
 	shaper    *Shaper
+	pump      *StreamPump // optional: when non-nil, Send enqueues here
 	epoch     atomic.Uint32
 
 	// Anti-replay.
@@ -99,8 +100,29 @@ func (t *Tunnel) SetReadTimeout(d time.Duration) {
 	t.readTimeout = d
 }
 
-// Send encrypts, frames, and sends payload through the tunnel.
+// AttachPump installs a stream pump on this tunnel. After this call,
+// Send enqueues payloads on the pump and Receive strips the wagon
+// prefix before returning data upstream. Must be called before any
+// Send/Receive traffic. The pump is started here.
+func (t *Tunnel) AttachPump(p *StreamPump) {
+	t.pump = p
+	p.Start()
+}
+
+// Send routes a mux payload. In stream mode the payload is enqueued on
+// the pump (blocking if the queue is full). Otherwise it goes straight
+// to the wire via sendRaw.
 func (t *Tunnel) Send(payload []byte) error {
+	if t.pump != nil {
+		return t.pump.Enqueue(payload)
+	}
+	return t.sendRaw(payload)
+}
+
+// sendRaw encrypts, frames, and transmits `payload` as one UDP datagram.
+// In stream mode `payload` is a full wagon plaintext (with RealLen prefix
+// and chaff trailer); otherwise it's a raw mux command.
+func (t *Tunnel) sendRaw(payload []byte) error {
 	// Increment epoch.
 	epoch := t.epoch.Add(1)
 
@@ -239,12 +261,32 @@ func (t *Tunnel) Receive() ([]byte, error) {
 			t.onRecv(n)
 		}
 
+		// In stream mode strip the wagon prefix. Chaff wagons (RealLen=0)
+		// are discarded here, below the mux layer, so mux never sees them.
+		if t.pump != nil {
+			real, isReal, perr := parseWagon(plaintext)
+			if perr != nil {
+				if t.onDrop != nil {
+					t.onDrop("wagon", perr)
+				}
+				continue
+			}
+			if !isReal {
+				continue
+			}
+			plaintext = real
+		}
+
 		return plaintext, nil
 	}
 }
 
-// Close closes the tunnel.
+// Close closes the tunnel. If a stream pump is attached it's stopped first
+// so the pump goroutine doesn't race with socket closure.
 func (t *Tunnel) Close() error {
+	if t.pump != nil {
+		t.pump.Close()
+	}
 	return t.conn.Close()
 }
 
@@ -253,6 +295,14 @@ func (t *Tunnel) PeerAddr() *net.UDPAddr {
 	t.peerMu.RLock()
 	defer t.peerMu.RUnlock()
 	return t.peer
+}
+
+// hasPeer reports whether a peer address is known. Used by StreamPump so
+// servers don't spam wagon emissions before the first client packet arrives.
+func (t *Tunnel) hasPeer() bool {
+	t.peerMu.RLock()
+	defer t.peerMu.RUnlock()
+	return t.peer != nil
 }
 
 // --- Anti-replay ---
