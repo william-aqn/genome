@@ -1,0 +1,117 @@
+\begin{thebibliography}{10}
+
+\bibitem{obfs4spec}
+Yawning Angel.
+\newblock obfs4 (the obfourscator).
+\newblock Technical report, Tor Project, 2014.
+\newblock
+  \url{https://gitlab.com/yawning/obfs4/-/blob/master/doc/obfs4-spec.txt}.
+
+\bibitem{bernstein2006curve25519}
+Daniel~J. Bernstein.
+\newblock Curve25519: New {Diffie-Hellman} speed records.
+\newblock In {\em Public Key Cryptography -- PKC 2006}, pages 207--228, 2006.
+
+\bibitem{bernstein2012elligator}
+Daniel~J. Bernstein, Mike Hamburg, Anna Krasnova, and Tanja Lange.
+\newblock Elligator: Elliptic-curve points indistinguishable from uniform
+  random strings.
+\newblock In {\em Proceedings of the 2013 ACM SIGSAC Conference on Computer and
+  Communications Security}, pages 967--980, 2013.
+
+\bibitem{cai2012touching}
+Xiang Cai, Xin~Cheng Zhang, Brijesh Joshi, and Rob Johnson.
+\newblock Touching from a distance: Website fingerprinting attacks and
+  defenses.
+\newblock In {\em Proceedings of the 2012 ACM Conference on Computer and
+  Communications Security (CCS)}, pages 605--616, 2012.
+
+\bibitem{dingledine2004tor}
+Roger Dingledine, Nick Mathewson, and Paul Syverson.
+\newblock {Tor}: The second-generation onion router.
+\newblock In {\em Proceedings of the 13th USENIX Security Symposium}, pages
+  303--320, 2004.
+
+\bibitem{dyer2012peekaboo}
+Kevin~P. Dyer, Scott~E. Coull, Thomas Ristenpart, and Thomas Shrimpton.
+\newblock Peek-a-boo, {I} still see you: Why efficient traffic analysis
+  countermeasures fail.
+\newblock In {\em Proceedings of the 2012 IEEE Symposium on Security and
+  Privacy}, pages 332--346, 2012.
+
+\bibitem{fisher1938statistical}
+Ronald~A. Fisher and Frank Yates.
+\newblock Statistical tables for biological, agricultural and medical research.
+\newblock Edinburgh, 1938. Oliver and Boyd.
+
+\bibitem{rfc6582}
+T.~Henderson, S.~Floyd, A.~Gurtov, and Y.~Nishida.
+\newblock The {NewReno} modification to {TCP}'s fast recovery algorithm.
+\newblock RFC 6582, IETF, April 2012.
+
+\bibitem{jacobson1988congestion}
+Van Jacobson.
+\newblock Congestion avoidance and control.
+\newblock In {\em Proceedings of ACM SIGCOMM}, pages 314--329, 1988.
+
+\bibitem{rfc5869}
+H.~Krawczyk and P.~Eronen.
+\newblock {HMAC}-based extract-and-expand key derivation function ({HKDF}).
+\newblock RFC 5869, IETF, May 2010.
+
+\bibitem{rfc5116}
+D.~McGrew.
+\newblock An interface and algorithms for authenticated encryption.
+\newblock RFC 5116, IETF, January 2008.
+
+\bibitem{nasr2018deepcorr}
+Milad Nasr, Alireza Bahramali, and Amir Houmansadr.
+\newblock {DeepCorr}: Strong flow correlation attacks on {Tor} using deep
+  learning.
+\newblock In {\em Proceedings of the 2018 ACM SIGSAC Conference on Computer and
+  Communications Security (CCS)}, pages 1962--1976, 2018.
+
+\bibitem{rfc8439}
+Y.~Nir and A.~Langley.
+\newblock {ChaCha20} and {Poly1305} for {IETF} protocols.
+\newblock RFC 8439, IETF, June 2018.
+
+\bibitem{panchenko2016website}
+Andriy Panchenko, Fabian Lanze, Jan Pennekamp, Thomas Engel, Andreas Zinnen,
+  Martin Henze, and Klaus Wehrle.
+\newblock Website fingerprinting at {Internet} scale.
+\newblock In {\em Proceedings of the Network and Distributed System Security
+  Symposium (NDSS)}, 2016.
+
+\bibitem{shadowsocks}
+{Shadowsocks Contributors}.
+\newblock Shadowsocks: A fast tunnel proxy, 2012.
+\newblock \url{https://shadowsocks.org}.
+
+\bibitem{vmess}
+{V2Ray Contributors}.
+\newblock {VMess} protocol specification, 2016.
+\newblock \url{https://www.v2fly.org/en_US/developer/protocols/vmess.html}.
+
+\bibitem{wang2012censorspoofer}
+Qiyan Wang, Xun Gong, Giang~T.K. Nguyen, Amir Houmansadr, and Nikita Borisov.
+\newblock {CensorSpoofer}: Asymmetric communication using {IP} spoofing for
+  censorship-resistant web browsing.
+\newblock In {\em Proceedings of the 2012 ACM Conference on Computer and
+  Communications Security}, 2012.
+
+\bibitem{winter2013scramblesuit}
+Philipp Winter, Tobias Pulls, and Juergen Fuss.
+\newblock {ScrambleSuit}: A polymorphic network protocol to circumvent
+  censorship.
+\newblock In {\em Proceedings of the 12th ACM Workshop on Privacy in the
+  Electronic Society (WPES)}, pages 213--224, 2013.
+
+\bibitem{wright2008spot}
+Charles~V. Wright, Scott~E. Coull, and Fabian Monrose.
+\newblock Traffic morphing: An efficient defense against statistical traffic
+  analysis.
+\newblock In {\em Proceedings of the Network and Distributed System Security
+  Symposium (NDSS)}, 2009.
+
+\end{thebibliography}

@@ -79,16 +79,16 @@
 
 % ============================================================
 \begin{abstract}
-Deep packet inspection (DPI) systems identify tunneling protocols by matching fixed byte patterns, header structures, and handshake sequences. We present \chameleon{}, a polymorphic UDP tunneling protocol where each session deterministically derives a unique wire format---called a \genome{}---from a pre-shared key (PSK) via HKDF-SHA256. The derived genome controls the packet magic byte, header field ordering, number and size of decoy fields, nonce length, payload length encoding scheme, and padding range. A deterministic PRNG based on SHA-256 in counter mode ensures that both endpoints independently derive an identical genome without any handshake.
+Deep packet inspection (DPI) systems identify tunneling protocols by matching fixed byte patterns, header structures, and handshake sequences. We present \chameleon{}, a polymorphic UDP tunneling protocol where each session deterministically derives a unique wire format---called a \genome{}---from a pre-shared key (PSK) via HKDF-SHA256. The derived genome controls the packet magic byte, header field ordering, number and size of decoy fields, nonce length, payload length encoding scheme, padding range, and (when stream mode is enabled) per-packet \emph{wagon} size range. A deterministic PRNG based on SHA-256 in counter mode ensures that both endpoints independently derive an identical genome without any handshake.
 
 Wire output achieves approximately 7.9 bits per byte of Shannon entropy, making individual packets statistically indistinguishable from uniform random data. The protocol provides authenticated encryption via ChaCha20-Poly1305, XChaCha20-Poly1305, or AES-256-GCM, with epoch-based nonce construction and a 256-epoch anti-replay sliding window.
 
-On top of the encrypted polymorphic transport, a stream multiplexer provides reliable, ordered delivery with selective acknowledgment (SACK), Jacobson/Karels RTT estimation, NewReno congestion control, and per-stream flow control. Empirical evaluation over a transatlantic link shows sustained throughput of 30~Mbit/s with 67 concurrent streams and per-packet overhead of 100--150 bytes.
+On top of the encrypted polymorphic transport, a stream multiplexer provides reliable, ordered delivery with selective acknowledgment (SACK), Jacobson/Karels RTT estimation, NewReno congestion control, and per-stream flow control. An optional \emph{stream mode} emits a constant flow of genome-shaped wagons at a configurable rate envelope, carrying real data when available and random chaff otherwise, defending against passive timing and activity inference on top of structural polymorphism. Empirical evaluation over a transatlantic link shows sustained throughput of 30~Mbit/s with 67 concurrent streams; stream mode preserves 86--97\% of direct throughput at its default 500~KB/s--3~MB/s envelope.
 
 \chameleon{} is implemented in Go with a single external dependency (\texttt{golang.org/x/crypto}) and is available as open-source software under the GPL-3.0 license.
 \end{abstract}
 
-\paragraph{Keywords:} protocol polymorphism, traffic obfuscation, UDP tunneling, deep packet inspection evasion, AEAD encryption, stream multiplexing, censorship circumvention
+\paragraph{Keywords:} protocol polymorphism, traffic obfuscation, UDP tunneling, deep packet inspection evasion, AEAD encryption, stream multiplexing, cover traffic, traffic analysis resistance, censorship circumvention
 
 % ============================================================
 \section{Introduction}\label{sec:intro}
@@ -105,10 +105,11 @@ Existing circumvention tools adopt two broad strategies. \emph{Protocol mimicry}
   \item A \emph{layered architecture} that cleanly separates polymorphic framing, authenticated encryption, reliable delivery, and stream multiplexing (\cref{sec:arch}).
   \item An \emph{epoch-based nonce} construction with anti-replay protection that eliminates nonce-reuse risks without per-packet random nonce generation (\cref{sec:crypto}).
   \item A reliable stream multiplexer over UDP with SACK, NewReno congestion control, and per-stream flow control (\cref{sec:mux}).
-  \item An \emph{empirical evaluation} demonstrating 30~Mbit/s throughput, 67 concurrent streams, and wire entropy of 7.9 bits/byte (\cref{sec:eval}).
+  \item A \emph{stream mode} (\cref{sec:stream}) that emits a constant, genome-shaped flow of ``wagons'' carrying real data or chaff. Per-packet wagon sizes are drawn from a genome-derived range $[W_{\min}, W_{\max}]$; the flow rate drifts inside an operator-configured envelope; burst mode drains the queue ``as is'' when real data exceeds the envelope.
+  \item An \emph{empirical evaluation} demonstrating 30~Mbit/s throughput, 67 concurrent streams, wire entropy of 7.9 bits/byte, and 86--97\% goodput retention under stream mode (\cref{sec:eval}).
 \end{enumerate}
 
-The rest of this paper is organized as follows. \cref{sec:related} surveys related work. \cref{sec:arch} describes the system architecture. \cref{sec:genome} details the genome derivation mechanism. \cref{sec:crypto} covers the cryptographic layer. \cref{sec:mux} describes the stream multiplexer. \cref{sec:security} presents the security analysis. \cref{sec:eval} reports performance results. \cref{sec:future} outlines future work, and \cref{sec:conclusion} concludes.
+The rest of this paper is organized as follows. \cref{sec:related} surveys related work. \cref{sec:arch} describes the system architecture. \cref{sec:genome} details the genome derivation mechanism. \cref{sec:crypto} covers the cryptographic layer. \cref{sec:mux} describes the stream multiplexer. \cref{sec:stream} introduces the stream (cover-traffic) mode. \cref{sec:security} presents the security analysis. \cref{sec:eval} reports performance results. \cref{sec:future} outlines future work, and \cref{sec:conclusion} concludes.
 
 % ============================================================
 \section{Related Work}\label{sec:related}
@@ -238,6 +239,8 @@ Given the PRNG seeded with $S_{\text{genome}}$, the genome $G$ is derived as fol
   \item \textbf{Field order}: All $5 + d$ fields are shuffled using Fisher-Yates with the genome PRNG, producing a permutation $\pi$.
 
   \item \textbf{Padding range} ($p_{\min}, p_{\max}$): $p_{\min} \in [0, 15]$, $p_{\max} \in [p_{\min}+1,\; p_{\min}+64]$. Each packet is padded with a random number of bytes drawn uniformly from $[p_{\min}, p_{\max}]$ using \texttt{crypto/rand}.
+
+  \item \textbf{Wagon size range} ($W_{\min}, W_{\max}$): $W_{\min} = \text{MSS} + 16 + r_1$ with $r_1 \in [0, 15]$, and $W_{\max} = W_{\min} + 24 + r_2$ with $r_2 \in [0, 79]$. Used only when stream mode is enabled (\cref{sec:stream}); both endpoints derive the same range, so they agree on the envelope without negotiation. The constraint $W_{\min} \geq \text{MSS} + 2$ ensures that any mux-layer command fits in the shortest wagon with the 2-byte real-length prefix.
 \end{enumerate}
 
 \begin{table}[htbp]
@@ -257,6 +260,8 @@ Decoy sizes & $[1, 8]$ each & \texttt{Intn(8)+1} & Field size variation \\
 Field order $\pi$ & $(5+d)!$ perms & \texttt{Shuffle} & Structure randomization \\
 Pad min $p_{\min}$ & $[0, 15]$ & \texttt{Intn(16)} & Minimum padding \\
 Pad max $p_{\max}$ & $[p_{\min}+1, p_{\min}+64]$ & \texttt{Intn(64)+1} & Maximum padding \\
+Wagon min $W_{\min}$ & $[\text{MSS}{+}16, \text{MSS}{+}31]$ & \texttt{MSS+16+Intn(16)} & Min wagon plaintext size \\
+Wagon max $W_{\max}$ & $[W_{\min}{+}24, W_{\min}{+}103]$ & \texttt{Intn(80)+24} & Max wagon plaintext size \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -448,6 +453,101 @@ On the send side, each stream limits outstanding (unacknowledged) bytes to 256~K
 To reduce ACK overhead, the multiplexer sends ACKs every 32 received data packets rather than per-packet. A 200~ms timer ensures that pending ACKs are flushed even during low-activity periods. ACKs are also triggered immediately when the receive window drops below 25\% of its default value.
 
 % ============================================================
+\section{Stream Mode: Constant-Rate Cover Traffic}\label{sec:stream}
+
+\subsection{Motivation: Timing and Activity Inference}\label{sec:stream_motivation}
+
+Structural polymorphism (\cref{sec:genome}) defeats signature-based DPI by making each packet statistically indistinguishable from random. However, a passive observer recording the \emph{flow-level} pattern---packet arrival times and counts---can still infer \emph{when} a user is active, even without decrypting a single byte. This ability enables website fingerprinting \cite{cai2012touching,panchenko2016website}, flow correlation across hops \cite{nasr2018deepcorr}, and statistical traffic analysis \cite{wright2008spot}. Efficient countermeasures have historically been difficult to deploy without prohibitive cost \cite{dyer2012peekaboo}.
+
+A natural defense is \emph{constant-rate cover traffic}: emit packets at a rate that is independent of application activity, so the observer sees no correlation between the encrypted flow and real events. \chameleon{}'s stream mode implements this defense while remaining consistent with the polymorphic-per-session design. Instead of a single fixed rate, \chameleon{} ties all observable cover parameters---packet size, flow rate envelope, burst thresholds---to the session genome, so that an observer without the PSK cannot even enumerate the envelope used by a particular session.
+
+\subsection{Wagon Wire Format}\label{sec:wagon_format}
+
+When stream mode is enabled, the plaintext carried inside the AEAD seal of every packet is a \emph{wagon}: a length-prefixed container of fixed size. The layout is:
+
+\begin{center}
+\begin{bytefield}[bitwidth=1.2em]{32}
+  \bitheader{0-31} \\
+  \bitbox{16}{\textsf{RealLen} (uint16 BE)} & \bitbox{16}{\textsf{Real bytes} (up to \textsf{RealLen})} \\
+  \wordbox{1}{\textsf{Real bytes} (continued)} \\
+  \wordbox{1}{Filler (zero bytes to total wagon size $W$)}
+\end{bytefield}
+\end{center}
+
+\textsf{RealLen} is a 16-bit big-endian length. A value of zero marks a pure-chaff wagon; the receiver silently discards the entire plaintext. A nonzero value names the number of real mux-command bytes immediately following; the filler tail is left as zeros because AEAD output is already indistinguishable from random on the wire, and the receiver never inspects the filler (it reads only \textsf{RealLen} and the first \textsf{RealLen} bytes that follow). This saves a \texttt{crypto/rand} syscall on every packet.
+
+Both endpoints use the wagon layout symmetrically; stream mode is an opt-in setting on each side, and peers must agree.
+
+\subsection{Genome-Derived Wagon Sizes}\label{sec:wagon_sizes}
+
+For each outgoing packet the sender draws a wagon size $W$ uniformly from $[W_{\min}, W_{\max}]$, where $W_{\min}$ and $W_{\max}$ are the genome-derived bounds introduced in \cref{sec:genome_params}. This gives three simultaneous properties:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Per-packet variation.} Every wagon has a different plaintext size (up to ciphertext-length variation), so an observer cannot exploit a fixed-size signature or exact-size correlation across packets.
+  \item \textbf{Genome-bound envelope.} Both $W_{\min}$ and $W_{\max}$ are HKDF-derived from the PSK. Only a peer who knows the PSK can predict the envelope. An observer sees random sizes but cannot determine the underlying range.
+  \item \textbf{Asynchronous agreement.} The sender draws $W$ locally; the receiver does not need to predict it (the UDP datagram boundary carries the size). Packet loss or reordering does not desynchronize any shared PRNG state---there is none.
+\end{enumerate}
+
+The invariant $W_{\min} \geq \text{MSS} + 2$ guarantees that the largest mux command (a \textsc{Data} segment with a 1200-byte payload plus 9-byte header) fits inside the smallest possible wagon with its 2-byte prefix. No mux-layer fragmentation is required.
+
+\subsection{Rate Envelope with Random Walk Drift}\label{sec:rate_envelope}
+
+The emission rate is controlled by a single pump goroutine on each side, configured with operator-chosen bounds $R_{\min}$ and $R_{\max}$ in plaintext bytes per second. On a per-session basis the pump maintains a current target rate $R(t)$ that is nudged once per second by a reflected random walk:
+
+\begin{equation}\label{eq:rate_drift}
+  R(t+1) = \text{clamp}_{[R_{\min}, R_{\max}]}\!\left(R(t) + \Delta\right), \quad \Delta \sim \mathcal{U}\!\left(-\tfrac{R_{\max}-R_{\min}}{8},\; +\tfrac{R_{\max}-R_{\min}}{8}\right)
+\end{equation}
+
+Between drift updates the pump schedules its next emission at
+
+\begin{equation}\label{eq:next_send}
+  t_{\text{next}} = t_{\text{prev}} + \frac{W}{R(t)},
+\end{equation}
+
+where $W$ is the wagon size chosen for the packet. When the envelope is wider than typical real-traffic rates, the flow rate appears to drift irregularly inside the envelope even under a steady load---described informally as ``a river that is never at full flow''. This non-trivial rate variation, together with genome-varied wagon sizes, complicates simple volume-versus-time fingerprinting.
+
+Wagon size $W$ is drawn at every tick, so the \emph{byte rate} follows $R(t)$ while the \emph{packet rate} is slightly modulated by the wagon-size distribution.
+
+\subsection{Burst: Handling Real Data That Exceeds the Envelope}\label{sec:burst}
+
+Constant-rate cover naturally conflicts with large downloads: if application bytes arrive faster than $R_{\max}$, something must give. The protocol's pump resolves this with a bounded \emph{burst mode}.
+
+The mux layer pushes encoded commands into a queue of capacity $Q = 1024$ wagons. The pump tracks the queue depth $q$ with hysteresis:
+
+\begin{align}
+  q \geq Q_{\text{high}} \Rightarrow \text{enter burst}, \qquad & Q_{\text{high}} = 128 \\
+  q \leq Q_{\text{low}}  \Rightarrow \text{exit burst},  \qquad & Q_{\text{low}}  = 32
+\end{align}
+
+In burst mode the effective rate used in \eqref{eq:next_send} is replaced by $R_{\text{burst}} = \beta \cdot R_{\max}$ with $\beta = 4$. This preserves a \emph{hard cap} on the wire rate---essential to avoid overrunning kernel UDP buffers, which would otherwise manifest as packet loss and trigger mux retransmissions that can collapse the stream---while allowing throughput to rise above the cover envelope when real data demands it. Both the hysteresis and $\beta$ are empirically tuned; see \cref{sec:eval_stream}.
+
+The queue capacity is large enough that mux backpressure (through blocking \texttt{Enqueue}) engages only after burst has been active long enough to make meaningful headway, avoiding an oscillation in which mux-layer write throttling and pump drain rate alternately dominate.
+
+\subsection{Pump Architecture and Single-Writer Model}\label{sec:pump_arch}
+
+With no pump attached, many mux goroutines may call \texttt{Tunnel.Send} concurrently; \texttt{*net.UDPConn} serializes writes at the socket level but packet order is otherwise unspecified. With a pump attached, a single pump goroutine is the sole writer to the UDP socket. This gives three desirable properties at no cost:
+
+\begin{enumerate}[nosep]
+  \item Strictly ordered emissions (the ordering on the wire follows the pump's timing, not the mux's producer threads).
+  \item No cross-goroutine interleaving of packets.
+  \item Cadence that tracks $R(t)$ with no jitter introduced by producer scheduling.
+\end{enumerate}
+
+The pump holds a scratch buffer of $W_{\max}$ bytes that is reused across ticks; only the real-data \texttt{copy} is needed per packet, with zeroing of the filler tail via \texttt{clear}. A server pump also checks peer availability before emitting: until the server has discovered its first valid client packet (from which it learns the peer address) the pump preserves its cadence but emits no packets, avoiding log spam and wasted wire bytes.
+
+\subsection{Cover Properties}\label{sec:cover_properties}
+
+The combined effect of the above mechanisms is:
+
+\begin{itemize}[nosep]
+  \item In the \emph{idle regime}, packets flow at rate $R(t) \in [R_{\min}, R_{\max}]$ with genome-varying sizes; content is pure chaff but encrypted and indistinguishable from real traffic.
+  \item In the \emph{partial-load regime} (aggregate real data below $R_{\max}$), real bytes replace filler within the same envelope; the wire rate is identical to the idle regime.
+  \item In the \emph{full-load regime} (real data above $R_{\max}$), burst lifts the rate up to $\beta R_{\max}$, wagons are packed to the brim with real bytes, and filler shrinks toward zero. The rate increase reveals \emph{that} the user is pushing data but not what or where.
+\end{itemize}
+
+Narrowing the envelope (e.g., setting $R_{\min} = R_{\max} = 100$~KB/s) gives strict cover traffic at the cost of bounded throughput; widening it (e.g., $500$~KB/s--$3$~MB/s, the default) balances practical usability with continued indistinguishability of browsing versus idle activity. The operator chooses the tradeoff.
+
+% ============================================================
 \section{Security Analysis}\label{sec:security}
 
 \subsection{Threat Model}\label{sec:threat}
@@ -493,12 +593,26 @@ An active prober without the PSK fails at step~1 with probability $255/256 \appr
 
 The 256-epoch sliding window (\cref{alg:replay}) rejects duplicate packets. The random initial epoch prevents an attacker from precomputing a valid epoch sequence. Even if an attacker replays a valid packet from a previous session, it will fail AEAD decryption because the session keys (derived from the same PSK but potentially different salt) differ.
 
+\subsection{Resistance to Timing and Activity Inference}\label{sec:timing_analysis}
+
+Without stream mode, \chameleon{} inherits the flow-level fingerprinting weakness common to all randomization-based tunnels: even with uniformly random packet content, \emph{when} a packet is sent is correlated with real application activity. Website fingerprinting attacks \cite{cai2012touching,panchenko2016website} and flow correlation attacks \cite{nasr2018deepcorr} exploit precisely this signal.
+
+Stream mode (\cref{sec:stream}) attacks this signal directly:
+\begin{enumerate}[nosep]
+  \item In the idle and partial-load regimes, the wire rate is completely independent of application activity. An observer cannot distinguish a user browsing a news site from a user with no real traffic at all.
+  \item In the full-load regime, the observer learns that the user is producing bytes at a rate above $R_{\max}$, but not the content, destination, or flow boundaries. This is analogous to observing a VPN user's aggregate bandwidth without learning what sites they visit.
+  \item Per-packet sizes are drawn from the genome-derived envelope $[W_{\min}, W_{\max}]$; only a peer with the PSK can predict the range. Size-based attacks such as the ones in \cite{dyer2012peekaboo} require stable size distributions, which \chameleon{} denies by tying them to the session PSK.
+\end{enumerate}
+
+Operators seeking stricter cover can narrow the envelope, at the cost of throughput. The protocol does not attempt to hide that \emph{some} cover traffic is flowing---that would require a complete blending attack against a host protocol---but it hides \emph{when} the user is active.
+
 \subsection{Known Limitations}\label{sec:limitations}
 
 \begin{enumerate}[nosep]
   \item \textbf{High-entropy detection.} An adversary who blocks \emph{all} high-entropy traffic (the ``noise paradox'') would also block \chameleon{}. This is a fundamental limitation of any randomization-based approach.
   \item \textbf{No forward secrecy.} Without an ephemeral key exchange (e.g., ECDH), compromise of the PSK allows decryption of all past and future sessions.
-  \item \textbf{Traffic analysis.} While packet lengths are padded, flow-level features (timing, volume, direction) may still reveal the nature of the underlying traffic.
+  \item \textbf{Cover breach during burst.} When real traffic exceeds the envelope, the pump's burst mode lifts the wire rate above $R_{\max}$, visibly signaling heavy activity. Narrow envelopes trade throughput for stricter cover.
+  \item \textbf{Cover cost.} Stream mode continuously emits bytes even when the user is idle. At the default $500$~KB/s--$3$~MB/s envelope this consumes non-trivial mobile bandwidth. The mode is opt-in for this reason.
 \end{enumerate}
 
 % ============================================================
@@ -565,6 +679,47 @@ Resource-heavy site & speedtest.net (67 resources) & Pass \\
 \end{tabular}
 \end{table}
 
+\subsection{Stream Mode Throughput}\label{sec:eval_stream}
+
+We evaluate the overhead of stream mode across rate envelopes using two harnesses. The first is \texttt{cmd/bench-stream}, an in-process benchmark that sets up both endpoints on a single Windows host over UDP loopback and drives 10~MB through the mux layer. The second deploys the server on the VDS, runs the client on the same host (loopback), and downloads a 10~MB file from \url{proof.ovh.net}; the direct path (no tunnel) from the VDS to OVH caps at 608~KB/s on the evaluated link.
+
+\begin{table}[htbp]
+\centering
+\caption{Stream-mode throughput on Windows UDP loopback before and after the pump-tuning optimizations (queue cap 128$\to$1024, hysteresis burst, $\beta=4$ rate cap, \texttt{fillWagon} scratch reuse). 10~MB sent.}
+\label{tab:bench_windows}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Envelope (bytes/sec)} & \textbf{Before} & \textbf{After} \\
+\midrule
+$[100{,}000,\; 700{,}000]$       & 0.18 MB/s & 2.43 MB/s \\
+$[500{,}000,\; 3{,}000{,}000]$   & 0.81 MB/s & 10.4 MB/s \\
+$[1{,}000{,}000,\; 5{,}000{,}000]$ & (stream aborted) & 17.4 MB/s \\
+$[2{,}000{,}000,\; 10{,}000{,}000]$ & (stream aborted) & 34.6 MB/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Stream-mode goodput over the VDS (Netherlands) to \url{proof.ovh.net}, 10~MB. Direct path (no tunnel) measures 608~KB/s.}
+\label{tab:bench_vds}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Configuration} & \textbf{Throughput} & \textbf{vs.\ direct} \\
+\midrule
+Direct (no tunnel)                                  & 608 KB/s & 100\% \\
+Stream $[100{,}000, 700{,}000]$                    & 524 KB/s & 86\% \\
+Stream $[500{,}000, 3{,}000{,}000]$ (default)      & 523 KB/s & 86\% \\
+Stream $[1{,}000{,}000, 5{,}000{,}000]$            & 590 KB/s & 97\% \\
+Stream $[2{,}000{,}000, 10{,}000{,}000]$           & 560 KB/s & 92\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In both harnesses the stream mode preserves the bulk of the native throughput once the pump parameters are tuned. The idle (chaff-only) mode holds the configured envelope---an \texttt{-idle} sub-command of \texttt{bench-stream} measures the wire rate and reports it stays inside $[R_{\min}, R_{\max}]$.
+
+Two factors motivated the tuning. (i)~The original queue capacity of 128 wagons was small enough that mux \texttt{Write} blocked on \texttt{Enqueue} before the queue ever reached the burst threshold; the pump then oscillated at the envelope midpoint instead of engaging burst. Raising the cap to 1024 with a $Q_{\text{high}}=128, Q_{\text{low}}=32$ hysteresis restored burst engagement without the flapping. (ii)~An initial implementation removed the rate cap entirely during burst, which on loopback overran the kernel UDP buffer and caused mux retransmissions to exhaust their budget. The $\beta = 4$ cap empirically maximizes burst throughput while keeping the socket below its drop point. These two changes are the difference between the ``before'' and ``after'' columns of \cref{tab:bench_windows}.
+
 % ============================================================
 \section{Future Work}\label{sec:future}
 
@@ -579,11 +734,11 @@ Resource-heavy site & speedtest.net (67 resources) & Pass \\
 % ============================================================
 \section{Conclusion}\label{sec:conclusion}
 
-We have presented \chameleon{}, a polymorphic UDP tunneling protocol that derives a unique wire format for each session from a pre-shared key. The genome derivation mechanism uses HKDF-SHA256 for key expansion and a deterministic SHA-256 counter-mode PRNG to generate session-specific parameters: magic byte, header field permutation, decoy fields, nonce size, length encoding scheme, and padding range. This yields over $10^{13}$ possible wire formats, making signature-based DPI detection infeasible.
+We have presented \chameleon{}, a polymorphic UDP tunneling protocol that derives a unique wire format for each session from a pre-shared key. The genome derivation mechanism uses HKDF-SHA256 for key expansion and a deterministic SHA-256 counter-mode PRNG to generate session-specific parameters: magic byte, header field permutation, decoy fields, nonce size, length encoding scheme, padding range, and wagon size range. This yields over $10^{13}$ possible wire formats, making signature-based DPI detection infeasible.
 
-The protocol achieves 7.9 bits/byte Shannon entropy on the wire, provides authenticated encryption with epoch-based nonce construction, and resists replay attacks through a 256-epoch sliding window. A stream multiplexer with SACK, NewReno congestion control, and per-stream flow control delivers reliable, ordered data over UDP at 30~Mbit/s with 67 concurrent streams.
+The protocol achieves 7.9 bits/byte Shannon entropy on the wire, provides authenticated encryption with epoch-based nonce construction, and resists replay attacks through a 256-epoch sliding window. A stream multiplexer with SACK, NewReno congestion control, and per-stream flow control delivers reliable, ordered data over UDP at 30~Mbit/s with 67 concurrent streams. An optional stream mode layers a constant flow of genome-shaped wagons on top of the transport: real data and random chaff share the same wire envelope, so a passive observer cannot tell when the user is active. Empirically, the mode preserves 86--97\% of direct throughput at a $500$~KB/s--$3$~MB/s envelope, with burst thresholds tuned to avoid UDP overrun.
 
-\chameleon{} demonstrates that per-session wire-format polymorphism is a viable and efficient approach to circumventing deep packet inspection, offering stronger fingerprint resistance than fixed-format randomization while maintaining practical throughput for real-world use.
+\chameleon{} demonstrates that per-session wire-format polymorphism is a viable and efficient approach to circumventing deep packet inspection. Combined with genome-shaped cover traffic, it offers stronger fingerprint and timing-analysis resistance than fixed-format randomization while maintaining practical throughput for real-world use.
 
 The implementation is released under the GNU General Public License v3.0 (GPL-3.0) and is available at \url{https://github.com/william-aqn/genome}. This paper is licensed under the Creative Commons Attribution 4.0 International License (CC~BY~4.0).
 
