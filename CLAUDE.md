@@ -8,15 +8,16 @@ Chameleon (`genome`) — polymorphic UDP tunneling protocol in Go. Every session
 
 1. **`internal/randutil`** — Deterministic PRNG (SHA-256 counter mode). Platform-stable, never use `math/rand` for genome derivation.
 2. **`crypto/`** — HKDF-SHA256 key derivation from PSK. AEAD: ChaCha20-Poly1305 (12-byte nonce), XChaCha20-Poly1305 (24-byte nonce), AES-256-GCM. Nonce = genome-derived prefix || epoch (big-endian uint32).
-3. **`morph/`** — Core polymorphism. `Derive(seed) -> *Genome` generates the wire format: magic byte, field order (Fisher-Yates), 0-3 decoy fields, nonce size 12/24, length encoding (BE/LE/varint/XOR), padding range. `Encoder`/`Decoder` handle frame serialization. Morph layer is crypto-agnostic — it never calls AEAD directly.
+3. **`morph/`** — Core polymorphism. `Derive(seed) -> *Genome` generates the wire format: magic byte, field order (Fisher-Yates), 0-3 decoy fields, nonce size 12/24, length encoding (BE/LE/varint/XOR), padding range, **wagon size range** (stream mode). `Encoder`/`Decoder` handle frame serialization. Morph layer is crypto-agnostic — it never calls AEAD directly.
 4. **`mux/`** — Stream multiplexer over `TransportConn` interface. Commands: OPEN, DATA, CLOSE, ACK. Full reliable delivery: per-stream sequence numbers, SACK, fast retransmit (3 dup ACKs), RTT estimation (Jacobson/Karels), NewReno congestion control, per-stream flow control. StreamID allocation: client=odd, server=even.
-5. **`transport/`** — UDP tunnel glue: `payload -> AEAD.Seal -> morph.Encode -> UDP`. Anti-replay sliding window (256 epochs). Random initial epoch prevents replay rejection on reconnect. Server discovers peer from first valid packet. UDP read timeouts are non-fatal (retry loop).
+5. **`transport/`** — UDP tunnel glue: `payload -> AEAD.Seal -> morph.Encode -> UDP`. Anti-replay sliding window (256 epochs). Random initial epoch prevents replay rejection on reconnect. Server discovers peer from first valid packet. UDP read timeouts are non-fatal (retry loop). Optional **`StreamPump`** (see below) can be attached to the tunnel to enforce constant-rate cover traffic.
 6. **`socks5/`** — RFC 1928 SOCKS5, CONNECT only, no-auth. Hands off to `ConnectHandler`.
 7. **`proxy/`** — Client: SOCKS5 -> `session.Open` -> bidirectional relay. Server: `session.Accept` -> `net.Dial` -> relay.
 8. **`config/`** — JSON config + CLI flags. PSK is hex-encoded.
 9. **`cmd/client/`, `cmd/server/`** — Entry points with graceful shutdown (SIGINT/SIGTERM). Drop callback logging for diagnostics.
 10. **`cmd/probe/`** — Tunnel diagnostic tool: sends one OPEN and prints server response / drop reasons.
-11. **`internal/dashboard/`** — Real-time ANSI console dashboard for the client: traffic stats, active streams, requests, logs.
+11. **`cmd/bench-stream/`** — Local throughput benchmark for the stream pump: `-bytes N` to push N bytes through a loopback mux session, `-stream -min-bps X -max-bps Y` to run with stream mode, `-idle` to measure pure-chaff wire rate.
+12. **`internal/dashboard/`** — Real-time ANSI console dashboard for the client: traffic stats, active streams, requests, logs.
 
 ## Build, test, deploy
 
@@ -45,6 +46,18 @@ Always use `-no-ui` when launching the client from this terminal — the ANSI da
 ./chameleon-client -no-ui -log debug -server HOST:PORT -psk PSK_HEX -socks 127.0.0.1:1080 -socks-user USER -socks-pass PASS
 ```
 The client auto-loads `client.json` if it exists next to the executable — no flags needed for repeated runs.
+
+## Stream mode (cover traffic)
+
+Optional mode, enabled via `-stream` on both peers. Implemented in `transport/stream_pump.go`:
+
+- A single pump goroutine drains mux commands from a bounded queue at a rate that drifts inside `[stream_min_bytes_per_sec, stream_max_bytes_per_sec]` via a 1-sec random walk. When idle, it emits pure-chaff wagons at the same rate so an observer sees a constant river of ciphertext.
+- Plaintext wire layout (inside AEAD): `[uint16 RealLen][Real bytes][zero filler]`. `RealLen=0` marks a chaff wagon; the receiver silently drops it in `Tunnel.Receive` below the mux layer.
+- Wagon size is drawn per-packet from `genome.WagonMin..WagonMax`. Both values are HKDF-derived from the PSK — observer sees random sizes, only a peer with the PSK knows the envelope. Invariant: `WagonMin >= muxMSS + 2` so any MSS-sized mux command fits in the shortest wagon.
+- Queue capacity 1024 with burst hysteresis (enter at 128, release at 32). When queue is above the high-water mark, the pump enters burst mode and drains at `maxRate * 4` ("as is") until the queue empties. Uncapped burst would flood UDP → mux sees loss → stream dies; the 4× cap is the empirical sweet spot.
+- `fillWagon` reuses a scratch buffer and uses `clear()` for the filler tail (AEAD already randomizes the wire; receiver never inspects filler).
+- Pump is a single writer to the UDP socket. Without pump, multiple goroutines write concurrently (goroutine-safe via `*UDPConn`). With pump, all writes funnel through the pump loop.
+- Mid-session toggle is not supported — `stream_mode` is startup-only.
 
 ## Key design decisions
 
@@ -93,7 +106,7 @@ The key insight: UDP has no built-in congestion control, so sending thousands of
 
 ## Important invariants
 
-- Same PSK + same code version = identical genome on any platform. If you change `internal/randutil` or `morph/genome.go`, verify cross-platform determinism.
+- Same PSK + same code version = identical genome on any platform. If you change `internal/randutil` or `morph/genome.go`, verify cross-platform determinism. Note: wagon fields are derived at the end of `Derive`, after padding, so changing them does not affect the rest of the genome — pre-stream-mode binaries remain wire-compatible for non-stream sessions.
 - `morph.Encoder.Encode` output must be indistinguishable from random. The entropy test in `morph/morph_test.go` (`TestFrameEntropy`) must pass >= 7.9 bits/byte.
 - Anti-replay window in `transport/tunnel.go` rejects epoch 0 and epochs outside the sliding window. Resets when peer address changes (client reconnect).
 - `mux.Session.recvLoop` runs independently of any stream's Write path — this prevents deadlocks where both sides block on flow control.
@@ -131,7 +144,7 @@ genome/
 ├── mux/{command,stream,session,reliability,congestion,flowcontrol}.go
 ├── proxy/{client,server}.go      # SOCKS5 <-> mux bridge
 ├── socks5/server.go              # SOCKS5 CONNECT
-├── transport/{tunnel,shaper}.go  # UDP + morph + AEAD
+├── transport/{tunnel,shaper,stream_pump}.go  # UDP + morph + AEAD + cover-traffic pump
 ├── build.sh                      # cross-compile
 ├── test.sh                       # full test suite
 ├── e2e-test.sh                   # live tunnel test

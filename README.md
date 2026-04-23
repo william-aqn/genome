@@ -33,8 +33,21 @@ The PSK is expanded via HKDF into a **session genome** — a complete wire forma
 - Nonce size: 12 or 24 bytes
 - Length encoding: uint16 BE / LE / varint / XOR-masked
 - Padding range
+- Wagon size range (for stream mode; see below)
 
 Both sides know the PSK -> both derive the same genome -> they can communicate. A third party sees noise with ~7.9 bits/byte entropy.
+
+## Stream Mode ("поток") — constant-rate cover traffic
+
+Optional mode that hides **when** the user is active. From the moment the tunnel opens, a steady flow of fixed-shape "wagons" leaves the sender regardless of real traffic. Each wagon carries either real mux data (length-prefixed) or random chaff. An observer sees a river of ciphertext at a predictable rate and cannot distinguish browsing from idle.
+
+- **Wagon size** is drawn per-packet from a **genome-derived range** `[WagonMin, WagonMax]`. From outside, sizes look random; only a peer knowing the PSK knows the envelope.
+- **Flow rate envelope** is configurable: `stream_min_bytes_per_sec` and `stream_max_bytes_per_sec`. The pump drifts its target rate inside this window with a 1-second random walk — "the river is never at full flow".
+- **Partial replacement**: when real data fits in a wagon, it's packed at the head and the rest is filler (`[uint16 RealLen][Real][Filler]`).
+- **Full replacement + burst**: when the send queue builds up, the pump enters burst mode and drains at up to `4 × max_bps`, sending real data "as is" until the queue empties.
+- **Receiver** strips the length prefix below the mux layer — chaff is invisible to the application.
+
+Enable with `-stream` on both client and server. Both endpoints must agree on the mode; rate envelopes are local settings. Typical overhead: the new wire layout is backward-compatible — sessions without `-stream` work exactly as before.
 
 ## Architecture
 
@@ -43,7 +56,7 @@ Both sides know the PSK -> both derive the same genome -> they can communicate. 
 | Crypto | `crypto/` | AEAD (ChaCha20-Poly1305 / AES-256-GCM / XChaCha20), HKDF keys |
 | Morph | `morph/` | Session genome, polymorphic framing (encode/decode) |
 | Mux | `mux/` | Stream multiplexer with reliable delivery (SACK, fast retransmit, NewReno, flow control) |
-| Transport | `transport/` | UDP tunnel = morph framing + AEAD + anti-replay |
+| Transport | `transport/` | UDP tunnel = morph framing + AEAD + anti-replay, stream pump |
 | SOCKS5 | `socks5/` | SOCKS5 CONNECT server (RFC 1928) |
 | Proxy | `proxy/` | Client (SOCKS5 -> mux) and server (mux -> dial TCP) |
 
@@ -158,6 +171,9 @@ bash build.sh
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-no-ui` | `false` | Disable dashboard, plain logs |
 | `-config` | `client.json` | Path to JSON config (auto-detected next to exe) |
+| `-stream` | `false` | Enable constant-rate cover traffic |
+| `-stream-min-bps` | `500000` (when `-stream`) | Flow envelope lower bound, bytes/sec |
+| `-stream-max-bps` | `3000000` (when `-stream`) | Flow envelope upper bound, bytes/sec |
 
 ### Server
 
@@ -168,6 +184,9 @@ bash build.sh
 | `-cipher` | `chacha20` | `chacha20` or `aes256gcm` |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-config` | | Path to JSON config |
+| `-stream` | `false` | Enable constant-rate cover traffic |
+| `-stream-min-bps` | `500000` (when `-stream`) | Flow envelope lower bound, bytes/sec |
+| `-stream-max-bps` | `3000000` (when `-stream`) | Flow envelope upper bound, bytes/sec |
 
 ### JSON config
 
@@ -181,7 +200,11 @@ bash build.sh
   "socks_pass": "mypass",
   "cipher_suite": "chacha20",
   "log_level": "info",
-  "idle_timeout_sec": 300
+  "idle_timeout_sec": 300,
+
+  "stream_mode": true,
+  "stream_min_bytes_per_sec": 500000,
+  "stream_max_bytes_per_sec": 3000000
 }
 ```
 
@@ -245,6 +268,7 @@ genome/
 ├── socks5/server.go            # SOCKS5 CONNECT
 ├── transport/
 │   ├── tunnel.go               # UDP + morph + AEAD
+│   ├── stream_pump.go          # Constant-rate cover traffic ("wagons")
 │   └── shaper.go               # Timing jitter
 ├── build.sh                    # Cross-compile
 ├── test.sh                     # Full test suite
@@ -270,6 +294,7 @@ The multiplexer provides:
 - **Replay attack**: anti-replay sliding window (256 epochs), random initial epoch
 - **Tampered packets**: AEAD authentication, epoch in associated data
 - **Active probing**: server does not respond without a valid first packet (PSK-only)
+- **Timing / activity inference** (with `-stream`): a constant flow of wagons hides when the user is actually sending real data. Burst mode breaks this partially during heavy downloads — narrow the envelope to trade throughput for stricter cover.
 
 ### Known Limitations
 
