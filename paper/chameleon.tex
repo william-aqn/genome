@@ -20,6 +20,16 @@
 \usepackage{url}
 \usepackage{bytefield}
 \usepackage{multirow}
+\usepackage{needspace}
+
+% Discourage orphan \paragraph headings at page ends — require enough
+% room below the heading for at least a few lines of the following content.
+\let\oldparagraph\paragraph
+\renewcommand{\paragraph}[1]{\needspace{5\baselineskip}\oldparagraph{#1}}
+
+% Stronger penalties against widows and orphans.
+\widowpenalty=10000
+\clubpenalty=10000
 
 % --- Hyperref setup (PDF metadata) ---
 \hypersetup{
